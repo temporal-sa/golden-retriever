@@ -27,6 +27,7 @@ from retrieval.temporal.models.operations import (
 )
 from retrieval.temporal.models.sync import SyncResult
 from retrieval.temporal.runtime_config import TemporalRuntimeConfig
+from retrieval.temporal.test_starter import execute_workflow_smoke_test
 from retrieval.temporal.worker import build_workers
 
 pytestmark = [
@@ -36,6 +37,20 @@ pytestmark = [
         reason="set RUN_TEMPORAL_INTEGRATION=1 to start a Temporal test server",
     ),
 ]
+
+
+async def test_local_starter_executes_sync_and_deactivation() -> None:
+    suffix = uuid4().hex
+    async with await WorkflowEnvironment.start_local() as environment:
+        result = await execute_workflow_smoke_test(
+            environment.client,
+            store_key=f"starter-integration-store-{suffix}",
+        )
+
+    assert result.sync_status == "succeeded"
+    assert result.deactivation_status == "succeeded"
+    assert result.lifecycle_generation == 1
+    assert result.final_lifecycle_state == "inactive"
 
 
 async def test_controller_sync_and_duplicate_deactivation_end_to_end() -> None:

@@ -22,6 +22,7 @@ dev = [
 
 [project.scripts]
 retrieval-worker = "retrieval.temporal.worker:main"
+retrieval-test-starter = "retrieval.temporal.test_starter:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/retrieval"]
