@@ -10,6 +10,7 @@ with workflow.unsafe.imports_passed_through():
     from retrieval.temporal.common.ids import document_ingest_workflow_id
     from retrieval.temporal.models.documents import (
         DocumentIngestionInput,
+        DocumentIngestionResult,
         DocumentMutation,
         DocumentRef,
     )
@@ -61,6 +62,7 @@ class FilesPageWorkflow:
                     "DocumentIngestionWorkflow",
                     child_input,
                     id=child_input.idempotency_key,
+                    result_type=DocumentIngestionResult,
                     cancellation_type=workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
                 )
                 self._completed += 1

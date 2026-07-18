@@ -69,9 +69,10 @@ class ActivateUserWorkflow:
                 cursor=None,
                 page_limit=max(1, command.recent_page_cap),
             ),
+            result_type=SyncResult,
             cancellation_type=workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
         )
-        if recent.status not in {ResultStatus.SUCCEEDED, ResultStatus.PARTIAL}:
+        if recent.status is not ResultStatus.SUCCEEDED or recent.errors:
             return recent
 
         # Cancellation is observed at this await boundary, then generation is explicitly
@@ -115,9 +116,10 @@ class ActivateUserWorkflow:
                 ),
                 completed_resource_types=tuple(recent_completed_resources),
             ),
+            result_type=SyncResult,
             cancellation_type=workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
         )
-        if backfill.status not in {ResultStatus.SUCCEEDED, ResultStatus.PARTIAL}:
+        if backfill.status is not ResultStatus.SUCCEEDED or backfill.errors:
             return backfill
 
         self._phase = "activating"

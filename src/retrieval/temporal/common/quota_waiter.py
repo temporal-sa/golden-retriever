@@ -21,6 +21,7 @@ from retrieval.temporal.common.ids import user_quota_workflow_id
 from retrieval.temporal.models.quota import (
     CancelPermit,
     PermitCompleted,
+    PermitDenied,
     PermitGrant,
     PermitRequest,
     QuotaObservation,
@@ -39,6 +40,7 @@ except ImportError:  # pragma: no cover - only for pure unit-test installs
 
 SIGNAL_WITH_START_USER_QUOTA_ACTIVITY = "signal_with_start_user_quota"
 QUOTA_GRANTED_SIGNAL = "quota_granted"
+QUOTA_DENIED_SIGNAL = "quota_denied"
 REQUEST_PERMIT_SIGNAL = "request_permit"
 CANCEL_PERMIT_SIGNAL = "cancel_permit"
 PERMIT_COMPLETED_SIGNAL = "permit_completed"
@@ -55,6 +57,14 @@ def _identity_decorator(*_args: Any, **_kwargs: Any) -> Callable[[_F], _F]:
 _workflow_signal = workflow.signal if workflow is not None else _identity_decorator
 
 
+class QuotaPermitDeniedError(RuntimeError):
+    """The shared coordinator explicitly refused to queue a permit request."""
+
+    def __init__(self, denial: PermitDenied) -> None:
+        super().__init__(denial.reason)
+        self.denial = denial
+
+
 class QuotaWaiterMixin:
     """Mixin implementing the caller half of the durable permit protocol.
 
@@ -67,6 +77,8 @@ class QuotaWaiterMixin:
             self._quota_expected_requests: dict[str, PermitRequest] = {}
         if not hasattr(self, "_quota_grants"):
             self._quota_grants: dict[str, PermitGrant] = {}
+        if not hasattr(self, "_quota_denials"):
+            self._quota_denials: dict[str, PermitDenied] = {}
         if not hasattr(self, "_quota_terminal_request_ids"):
             self._quota_terminal_request_ids: set[str] = set()
         if not hasattr(self, "_quota_terminal_order"):
@@ -99,6 +111,22 @@ class QuotaWaiterMixin:
         ):
             return
         self._quota_grants[grant.request_id] = grant
+
+    @_workflow_signal(name=QUOTA_DENIED_SIGNAL)
+    def quota_denied(self, denial: PermitDenied) -> None:
+        """Record an exact denial so a requester never waits indefinitely."""
+
+        self._ensure_quota_waiter_state()
+        expected = self._quota_expected_requests.get(denial.request_id)
+        if (
+            expected is None
+            or denial.request_id in self._quota_terminal_request_ids
+            or denial.request_id in self._quota_grants
+            or denial.request_id in self._quota_denials
+            or denial.quota_scope != expected.quota_scope
+        ):
+            return
+        self._quota_denials[denial.request_id] = denial
 
     @staticmethod
     def quota_workflow_id_for_scope(scope: QuotaScope) -> str:
@@ -213,10 +241,19 @@ class QuotaWaiterMixin:
                 retry_policy=retry_policy,
                 cancellation_type=ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
             )
-            await workflow.wait_condition(lambda: request_id in self._quota_grants)
+            await workflow.wait_condition(
+                lambda: request_id in self._quota_grants or request_id in self._quota_denials
+            )
+            denial = self._quota_denials.pop(request_id, None)
+            if denial is not None:
+                self._mark_quota_request_terminal(request_id)
+                raise QuotaPermitDeniedError(denial)
             grant = self._quota_grants.pop(request_id)
             self._mark_quota_request_terminal(request_id)
             return grant
+        except QuotaPermitDeniedError:
+            self._quota_grants.pop(request_id, None)
+            raise
         except asyncio.CancelledError:
             current_task = asyncio.current_task()
             if current_task is not None:
@@ -230,6 +267,7 @@ class QuotaWaiterMixin:
                 reason="requester canceled while waiting for quota",
             )
             self._quota_grants.pop(request_id, None)
+            self._quota_denials.pop(request_id, None)
             self._mark_quota_request_terminal(request_id)
             raise
         except Exception:
@@ -241,6 +279,7 @@ class QuotaWaiterMixin:
                 reason="requester stopped waiting after request failure",
             )
             self._quota_grants.pop(request_id, None)
+            self._quota_denials.pop(request_id, None)
             self._mark_quota_request_terminal(request_id)
             raise
         finally:
@@ -297,9 +336,11 @@ __all__ = [
     "DEFAULT_GRANT_DEDUP_SIZE",
     "OBSERVE_QUOTA_SIGNAL",
     "PERMIT_COMPLETED_SIGNAL",
+    "QUOTA_DENIED_SIGNAL",
     "QUOTA_GRANTED_SIGNAL",
     "REQUEST_PERMIT_SIGNAL",
     "SIGNAL_WITH_START_USER_QUOTA_ACTIVITY",
+    "QuotaPermitDeniedError",
     "QuotaPermitWaiterMixin",
     "QuotaWaiterMixin",
 ]

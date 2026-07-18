@@ -1,4 +1,4 @@
-"""Preserved comments-resync history/retry boundary."""
+"""Direct comments-resource sync workflow boundary."""
 
 from __future__ import annotations
 
@@ -15,5 +15,6 @@ class CommentsResyncWorkflow:
         return await workflow.execute_child_workflow(
             "ResourceSyncWorkflow",
             command,
+            result_type=SyncResult,
             cancellation_type=workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
         )

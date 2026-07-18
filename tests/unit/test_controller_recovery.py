@@ -65,6 +65,41 @@ async def test_pre_fence_terminal_failure_restores_active_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pre_fence_terminal_failure_preserves_remediation_syncing_state() -> None:
+    operation_id = "store-deactivation/operation"
+    remediation_id = "failed-user-remediation/active"
+    state = StoreControllerState(
+        store_key="store",
+        lifecycle_state=StoreLifecycleState.DEACTIVATING,
+        lifecycle_generation=4,
+        active_remediations={
+            remediation_id: RemediationRegistration(
+                operation_id=remediation_id,
+                workflow_id=remediation_id,
+                lifecycle_generation=4,
+                sync_sequence="sequence",
+            )
+        },
+        active_deactivation_id=operation_id,
+        active_deactivation_fenced=False,
+        authority_initialized=True,
+    )
+
+    await StoreControllerWorkflow(state)._operation_status(
+        OperationStatusEvent(
+            operation_id=operation_id,
+            workflow_id=operation_id,
+            lifecycle_generation=4,
+            status=OperationStatus.FAILED,
+            result_status=ResultStatus.FAILED,
+        )
+    )
+
+    assert state.lifecycle_generation == 4
+    assert state.lifecycle_state is StoreLifecycleState.SYNCING
+
+
+@pytest.mark.asyncio
 async def test_terminal_failure_infers_committed_fence_from_advanced_generation() -> None:
     operation_id = "store-deactivation/operation"
     state = StoreControllerState(

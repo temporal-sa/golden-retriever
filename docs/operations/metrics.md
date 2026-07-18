@@ -1,100 +1,114 @@
 # Metrics, dashboards, and alerts
 
-## Export prerequisite
+This page defines the observability contract for operators. The code creates application metric
+instruments, but `retrieval-worker` does **not** configure a metrics exporter. A production host
+must create an OpenTelemetry- or Prometheus-enabled Temporal SDK runtime before `Client.connect`.
 
-Application instruments and Temporal SDK/Core built-ins share the SDK runtime telemetry
-pipeline. `retrieval-worker` currently creates the default runtime, whose
-`TelemetryConfig.metrics` is `None`; therefore it exports **no metrics by default**. A
-production integration must construct an OpenTelemetry or Prometheus-enabled Temporal
-runtime before `Client.connect`, then verify the resulting instrument names in the backend.
+The SDK runtime normally prefixes instruments with `temporal_`; Prometheus export can also add
+counter and unit suffixes. Confirm the final names in the selected backend instead of hard-coding
+the base names below.
 
-The runtime applies `temporal_` as its default metric prefix. The tables below show base
-instrument names from code; the exporter can add that prefix and Prometheus counter/unit
-suffixes according to its runtime configuration.
+## Application metrics
 
-## Application-defined instruments
+Workflow metrics use the replay-aware `workflow.metric_meter`; Activity metrics use
+`activity.metric_meter`.
 
-`common/metrics.py` defines the following base names. Workflow instruments use the
-replay-aware `workflow.metric_meter`; Activity instruments use `activity.metric_meter`.
-
-| Base instrument name | Type | Current emission |
+| Base instrument | Type | Meaning |
 |---|---|---|
-| `retrieval_quota_permit_requests` | Counter | Permit request accepted or ignored |
+| `retrieval_quota_permit_requests` | Counter | Permit requests accepted, denied, or ignored |
 | `retrieval_quota_permits_granted` | Counter | Permits granted |
-| `retrieval_quota_grant_signal_failures` | Counter | Grant signal delivery failed |
-| `retrieval_quota_pending_requests` | Gauge | Current pending permit count |
-| `retrieval_quota_in_flight` | Gauge | Current reserved/in-flight permit count |
-| `retrieval_quota_scope_blocked` | Gauge | Current scope blocked state, 0 or 1 |
-| `retrieval_quota_wait_duration_ms` | Histogram | Request-to-grant wait in milliseconds |
+| `retrieval_quota_grant_signal_failures` | Counter | Failed grant Signal delivery |
+| `retrieval_quota_pending_requests` | Gauge | Pending permit requests |
+| `retrieval_quota_in_flight` | Gauge | Reserved or in-flight permits |
+| `retrieval_quota_scope_blocked` | Gauge | Quota scope blocked state, 0 or 1 |
+| `retrieval_quota_wait_duration_ms` | Histogram | Request-to-grant latency |
 | `retrieval_provider_requests` | Counter | Provider calls by operation and outcome |
-| `retrieval_provider_quota_exhausted` | Counter | Structured provider quota exhaustion/429 |
-| `retrieval_lifecycle_transitions` | Counter | Lifecycle transition attempts/outcomes |
-| `retrieval_stale_generation_rejections` | Counter | Generation-fence rejections |
-| `retrieval_document_ingestion_results` | Counter | Ingestion results by mutation/status |
-| `retrieval_deactivation_drain_duration_ms` | Histogram | Deactivation drain duration and outcome |
+| `retrieval_provider_quota_exhausted` | Counter | Structured provider exhaustion or 429 responses |
+| `retrieval_lifecycle_transitions` | Counter | Lifecycle transition attempts and outcomes |
+| `retrieval_stale_generation_rejections` | Counter | Mutations rejected by the generation fence |
+| `retrieval_document_ingestion_results` | Counter | Document mutation outcomes |
+| `retrieval_deactivation_drain_duration_ms` | Histogram | Deactivation drain latency and outcome |
 
-Allowed application attributes are intentionally bounded to `mutation`, `operation`,
-`provider`, `quota_class`, `reason`, `status`, `transition`, and `work_class`. Workflow,
-request, operation, store, credential, cursor, and hash identifiers are excluded. String
-values over 64 UTF-8 bytes collapse to `other`, and metric failures never alter business
-behavior.
+Allowed attributes are intentionally bounded to `mutation`, `operation`, `provider`,
+`quota_class`, `reason`, `status`, `transition`, and `work_class`. Raw or hashed workflow,
+request, operation, store, user, credential, and cursor identifiers are excluded. Values over 64
+UTF-8 bytes collapse to `other`. Metric failures must never change workflow behavior.
 
-## Temporal SDK/Core built-ins
+## Temporal SDK and Core metrics
 
-Do not duplicate SDK/Core instruments as application metrics. Once runtime telemetry is
-enabled, use the SDK bases below for Task Queue and worker health (normally exported with
-the `temporal_` prefix):
+Use SDK/Core metrics for worker and Task Queue health rather than duplicating them in application
+code. Important base instruments include:
 
-- `activity_schedule_to_start_latency` for Activity Task Queue dispatch latency;
-- `workflow_task_schedule_to_start_latency` for Workflow Task Queue dispatch latency;
+- `activity_schedule_to_start_latency` and `workflow_task_schedule_to_start_latency`;
 - `activity_execution_latency`, `workflow_task_execution_latency`, and
-  `workflow_task_replay_latency` for worker processing;
-- `worker_task_slots_available`, `worker_task_slots_used`, and `num_pollers` for worker
-  capacity and availability;
-- the SDK task poll success/empty and workflow completion/failure counters for worker and
-  execution health.
+  `workflow_task_replay_latency`;
+- `worker_task_slots_available`, `worker_task_slots_used`, and `num_pollers`;
+- Task poll success/empty counters and workflow completion/failure counters.
 
-The SDK built-ins do not replace application quota, lifecycle, or generation-fence
-instruments. They also do not provide this repository's required per-execution Workflow
-History event/byte measurements.
+These do not replace the application quota, lifecycle, provider, or generation-fence metrics.
+They also do not provide continuous per-execution Workflow History event and byte measurements.
 
-## Specification coverage and rollout gaps
+## Coverage status
 
-| Required signal | Source | Status |
+| Operational signal | Source | Status |
 |---|---|---|
-| Active store sync runs | — | **Gap:** no application gauge |
-| Active detached remediations | — | **Gap:** no application gauge |
+| Active store sync runs | — | Missing application gauge |
+| Active detached remediations | — | Missing application gauge |
 | Quota scopes blocked | `retrieval_quota_scope_blocked` | Implemented |
 | Pending quota permits | `retrieval_quota_pending_requests` | Implemented |
 | Quota permit wait duration | `retrieval_quota_wait_duration_ms` | Implemented |
-| Quota grants per reset window | `retrieval_quota_permits_granted` | **Partial:** grants are counted, but reset-window totals are not recorded directly |
-| Quota grant signal failures | `retrieval_quota_grant_signal_failures` | Implemented |
+| Grants per reset window | `retrieval_quota_permits_granted` | Partial: grants counted, windows not aggregated directly |
+| Quota grant Signal failures | `retrieval_quota_grant_signal_failures` | Implemented |
+| Provider exhaustion/429 | `retrieval_provider_quota_exhausted` | Implemented |
 | Stale-generation rejections | `retrieval_stale_generation_rejections` | Implemented |
-| Sync cancellation latency | — | **Gap:** no application histogram |
+| Sync cancellation latency | — | Missing histogram |
 | Deactivation drain latency | `retrieval_deactivation_drain_duration_ms` | Implemented |
-| Deactivation incomplete count | drain histogram with `status=timed_out` | **Partial:** derivable for drain timeout, but no complete incomplete-operation counter |
-| Workflow History length/size | opt-in load harness only | **Gap:** no continuous production instrument/collector |
-| Activity schedule-to-start latency | SDK `activity_schedule_to_start_latency` | Available only after runtime telemetry is enabled |
-| Provider 429/quota exhaustion | `retrieval_provider_quota_exhausted` | Implemented |
+| Incomplete deactivation count | Drain histogram with `status=timed_out` | Partial: no complete counter |
+| Workflow History events/bytes | Opt-in load harness | Missing continuous collector |
+| Activity schedule-to-start | SDK metric | Available after runtime telemetry is enabled |
 
-Runtime telemetry configuration, the two missing gauges, cancellation latency, continuous
-history measurement, direct reset-window accounting, and complete deactivation-incomplete
-coverage are rollout gaps. Dashboards and alerts are not provisioned by this repository.
+Missing and partial signals are production-readiness gaps. Dashboards and alert resources are not
+provisioned by this repository.
 
-## Required dashboards and alerts
+## Dashboard views
 
-Dashboards must combine application and SDK metrics to show:
+At minimum, provide these views by namespace, Task Queue, deployment/build, provider, quota class,
+operation, and bounded outcome where applicable:
 
-- pending/in-flight/blocked quota state, wait percentiles, grants, and grant failures;
-- provider request outcomes and quota exhaustion;
-- lifecycle transitions, stale-generation rejections, and ingestion outcomes;
-- cancellation and deactivation drain latency/incomplete operations;
-- Activity/Workflow schedule-to-start latency, pollers, and worker slot saturation;
-- active sync/remediation counts and Workflow History event/byte growth after the gaps above
-  are closed.
+1. **Worker health:** pollers, slots, poll success/empty, Workflow Task failures, Activity failures,
+   and schedule-to-start percentiles for both queues.
+2. **Provider and quota:** provider outcomes, exhaustion, pending and in-flight permits, blocked
+   scopes, wait percentiles, grants, and grant-Signal failures.
+3. **Store lifecycle:** active sync/remediation counts after instrumentation is added, transitions,
+   cancellation latency, deactivation drain latency, incomplete cleanup, and final outcomes.
+4. **Data safety:** stale-generation rejections and document ingestion results. A successful stale
+   generation commit must be structurally impossible and treated as a critical incident if
+   detected by an external audit.
+5. **History and capacity:** event/byte growth, Continue-As-New frequency, execution duration,
+   pending tasks, throughput, and provider queue saturation.
 
-Alert when remediation survives an inactive store, a stale-generation commit succeeds,
-deactivation exceeds its SLA, a pending queue grows after reset, no grant follows a valid
-reset, worker pollers/slots cannot service either Task Queue, or a new `QuotaWaitWorkflow`
-or `AccessioningWorkflow` appears after cutover. Every alert must be exercised against the
-production exporter before enabling V2 routing.
+## Alert conditions
+
+Choose thresholds from production-like load results and service SLOs. Alert on:
+
+- no healthy pollers or sustained slot exhaustion on either Task Queue;
+- schedule-to-start latency above its SLO;
+- a quota scope still blocked or growing after its authoritative reset;
+- valid reset observations followed by no grants;
+- grant Signal failures or provider authentication failures;
+- deactivation drain or completion above its SLA;
+- remediation that remains active after its store becomes inactive;
+- abnormal stale-generation rejection or ingestion-failure rates;
+- Workflow History approaching configured event or payload limits;
+- unexpected creation of optional drain-only Workflow Types.
+
+Exercise every alert with the production exporter and paging route before admitting customer
+traffic. Include runbook links and the deployment/build identity in alert context without exposing
+high-cardinality business identifiers.
+
+## Local validation limits
+
+The integration and load suites verify that selected metrics and latency measurements can be
+observed in controlled runs. They do not configure a durable exporter, dashboard, alert, or
+production threshold. Follow the [production-readiness guide](../architecture-production-readiness.md)
+and [deployment runbook](../runbooks/migration-and-rollback.md) for release requirements.

@@ -40,6 +40,7 @@ async def test_quota_client_carries_config_into_initial_workflow_state() -> None
         client,  # type: ignore[arg-type]
         task_queue="retrieval",
         max_in_flight=3,
+        max_pending_requests=19,
         dedup_window_size=17,
         continue_as_new_message_count=23,
     )
@@ -56,6 +57,7 @@ async def test_quota_client_carries_config_into_initial_workflow_state() -> None
     initial_state = client.calls[0][0][1]
     assert isinstance(initial_state, UserQuotaState)
     assert initial_state.max_in_flight == 3
+    assert initial_state.max_pending_requests == 19
     assert initial_state.dedup_window_size == 17
     assert initial_state.continue_as_new_message_count == 23
 
@@ -119,6 +121,7 @@ def test_build_workers_passes_both_quota_settings(
     monkeypatch.setattr(worker_module, "Worker", _Worker)
     config = RetrievalTemporalConfig(
         user_quota_max_in_flight=4,
+        user_quota_max_pending_requests=29,
         user_quota_dedup_window_size=31,
         user_quota_continue_as_new_message_count=37,
     )
@@ -133,5 +136,6 @@ def test_build_workers_passes_both_quota_settings(
     )
 
     assert captured["max_in_flight"] == 4
+    assert captured["max_pending_requests"] == 29
     assert captured["dedup_window_size"] == 31
     assert captured["continue_as_new_message_count"] == 37

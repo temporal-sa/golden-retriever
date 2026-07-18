@@ -73,6 +73,7 @@ class FailedUserRemediationWorkflow:
                         child_sequence,
                         user_key,
                     ),
+                    result_type=SyncResult,
                     cancellation_type=workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
                 )
             finally:
@@ -145,11 +146,7 @@ class FailedUserRemediationWorkflow:
                     raise result
                 if isinstance(result, BaseException):
                     errors = (type(result).__name__,)
-                elif result.status in {
-                    ResultStatus.FAILED,
-                    ResultStatus.REJECTED,
-                    ResultStatus.CANCELED,
-                }:
+                elif result.status is not ResultStatus.SUCCEEDED or result.errors:
                     errors = result.errors or (result.status.value,)
                 else:
                     self._completed += 1

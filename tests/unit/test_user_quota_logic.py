@@ -8,11 +8,15 @@ import pytest
 
 from retrieval.temporal.common import quota_waiter as quota_waiter_module
 from retrieval.temporal.common.ids import permit_id
-from retrieval.temporal.common.quota_waiter import QuotaWaiterMixin
+from retrieval.temporal.common.quota_waiter import (
+    QuotaPermitDeniedError,
+    QuotaWaiterMixin,
+)
 from retrieval.temporal.models.quota import (
     CancelGenerationPermits,
     CancelPermit,
     PermitCompleted,
+    PermitDenied,
     PermitGrant,
     PermitRequest,
     QuotaObservation,
@@ -20,6 +24,7 @@ from retrieval.temporal.models.quota import (
     UserQuotaState,
 )
 from retrieval.temporal.workflows.user_quota import (
+    UserQuotaWorkflow,
     apply_cancel_generation_permits,
     apply_cancel_permit,
     apply_permit_completed,
@@ -28,6 +33,7 @@ from retrieval.temporal.workflows.user_quota import (
     compact_quota_state,
     grant_available_permits,
     next_quota_timer_delay,
+    permit_request_denial,
     quota_snapshot,
 )
 
@@ -129,6 +135,49 @@ def test_duplicate_and_terminal_requests_are_idempotent() -> None:
     assert not apply_permit_request(state, permit_request)
     assert state.pending == {}
     assert state.pending_order == []
+
+
+def test_pending_queue_capacity_is_bounded_and_returns_explicit_denial() -> None:
+    state = UserQuotaState(
+        quota_scope=SCOPE,
+        max_in_flight=1,
+        max_pending_requests=2,
+    )
+    assert apply_permit_request(state, request("r1"))
+    assert apply_permit_request(state, request("r2"))
+
+    overflow = request("r3")
+    denial = permit_request_denial(state, overflow)
+
+    assert denial == PermitDenied(
+        request_id="r3",
+        quota_scope=SCOPE,
+        reason="quota pending queue is at capacity",
+        retryable=True,
+    )
+    assert not apply_permit_request(state, overflow)
+    assert state.pending_order == ["r1", "r2"]
+
+
+def test_quota_workflow_queues_denial_for_capacity_overflow() -> None:
+    quota = UserQuotaWorkflow()
+    state = UserQuotaState(quota_scope=SCOPE, max_pending_requests=1)
+    quota._initialize(state)
+    quota._apply_message("request", request("accepted"))
+    quota._apply_message("request", request("overflow"))
+
+    assert state.pending_order == ["accepted"]
+    assert quota._pending_denials == [
+        (
+            "requester/overflow",
+            PermitDenied(
+                "overflow",
+                SCOPE,
+                "quota pending queue is at capacity",
+                retryable=True,
+            ),
+        )
+    ]
 
 
 def test_cancel_before_request_tombstones_the_race() -> None:
@@ -423,6 +472,34 @@ def test_quota_waiter_keeps_grant_delivered_before_wait_condition(
 
     assert result == accepted
     assert fake_workflow.wait_condition_was_ready
+
+
+def test_quota_waiter_fails_immediately_on_exact_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waiter = QuotaWaiterMixin()
+    permit_request = request("denied")
+    denial = PermitDenied(
+        "denied",
+        SCOPE,
+        "quota pending queue is at capacity",
+        retryable=True,
+    )
+
+    class FakeWorkflow:
+        async def execute_activity(self, *_args: object, **_kwargs: object) -> None:
+            waiter.quota_denied(denial)
+
+        async def wait_condition(self, predicate: Callable[[], bool]) -> None:
+            assert predicate()
+
+    monkeypatch.setattr(quota_waiter_module, "workflow", FakeWorkflow())
+
+    with pytest.raises(QuotaPermitDeniedError) as raised:
+        asyncio.run(waiter.request_quota_permit(permit_request))
+
+    assert raised.value.denial == denial
+    assert waiter._quota_expected_requests == {}
 
 
 def test_quota_waiter_cancels_shared_request_when_local_wait_is_canceled(

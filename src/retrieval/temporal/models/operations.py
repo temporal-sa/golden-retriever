@@ -77,8 +77,7 @@ class StartDeactivationCommand:
     requested_at: datetime | None = None
 
 
-# A shorter alias is convenient for client code and keeps compatibility with
-# the wording used by early versions of the V2 design document.
+# A shorter public alias is convenient for client code.
 DeactivateStoreCommand = StartDeactivationCommand
 
 

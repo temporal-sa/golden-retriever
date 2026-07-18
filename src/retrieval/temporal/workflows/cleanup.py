@@ -1,4 +1,4 @@
-"""Preserved, bounded cleanup and user-deactivation workflow tree."""
+"""Bounded cleanup and user-deactivation workflow tree."""
 
 from __future__ import annotations
 

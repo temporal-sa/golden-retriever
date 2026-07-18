@@ -63,6 +63,7 @@ class UserSyncWorkflow:
                         command.user_key,
                         resource_key,
                     ),
+                    result_type=SyncResult,
                     cancellation_type=workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
                 )
             finally:

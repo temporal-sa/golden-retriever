@@ -26,6 +26,7 @@ from retrieval.temporal.models.sync import (
     ActivateUserInput,
     FailedUserRemediationInput,
     FilesPageInput,
+    PageResult,
     ResourcePagesInput,
     RoundState,
     StoreSyncInput,
@@ -94,6 +95,93 @@ async def test_ordinary_user_batch_joins_all_tasks_and_returns_user_failures() -
     assert completed == ["good", "bad"]
     assert isinstance(results[0], SyncResult)
     assert isinstance(results[1], RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_ordinary_partial_user_is_failed_and_remediated() -> None:
+    root = RootSyncWorkflow()
+    remediation_calls: list[tuple[tuple[str, ...], object | None]] = []
+
+    async def one_user(
+        _command: StoreSyncInput,
+        _cursor: str | None,
+        **_options: object,
+    ) -> ActiveUsersPage:
+        return ActiveUsersPage(
+            request_id="users",
+            users=(UserDescriptor("partial-user"),),
+        )
+
+    async def partial_batch(*_args: object, **_kwargs: object) -> list[SyncResult]:
+        return [
+            SyncResult(
+                store_key="opaque-store",
+                lifecycle_generation=3,
+                sync_sequence="sync",
+                status=ResultStatus.PARTIAL,
+                errors=("document ingest failed",),
+                details={"finished": False, "next_cursor": "retry-here"},
+            )
+        ]
+
+    async def record_remediation(
+        _command: StoreSyncInput,
+        failed_user_keys: tuple[str, ...],
+        *,
+        partition: object | None = None,
+    ) -> str:
+        remediation_calls.append((failed_user_keys, partition))
+        return "remediation/partial-user"
+
+    root._list_users = one_user  # type: ignore[method-assign]
+    root._join_user_batch = partial_batch  # type: ignore[method-assign]
+    root._start_remediation = record_remediation  # type: ignore[method-assign]
+
+    result, failed = await root._ordinary(StoreSyncInput("opaque-store", 3, "sync"))
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.progress.users_completed == 0
+    assert result.progress.users_failed == 1
+    assert result.details["error_count"] == 1
+    assert result.details["remediation_workflow_count"] == 1
+    assert failed == ("partial-user",)
+    assert remediation_calls == [(("partial-user",), ("ordinary", 0))]
+
+
+@pytest.mark.asyncio
+async def test_ordinary_preserves_cumulative_progress_and_error_sample() -> None:
+    root = RootSyncWorkflow()
+
+    async def empty_page(
+        _command: StoreSyncInput,
+        _cursor: str | None,
+        **_options: object,
+    ) -> ActiveUsersPage:
+        return ActiveUsersPage(request_id="users")
+
+    root._list_users = empty_page  # type: ignore[method-assign]
+    result, failed = await root._ordinary(
+        StoreSyncInput(
+            "opaque-store",
+            3,
+            "sync",
+            failed_user_keys=("failed-before-rollover",),
+            prior_error_count=2,
+            prior_users_completed=9,
+            prior_users_failed=2,
+            user_pages_completed=4,
+            error_sample=("first error", "second error"),
+            failed_user_keys_remediated=True,
+        )
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.progress.users_completed == 9
+    assert result.progress.users_failed == 2
+    assert result.errors == ("first error", "second error")
+    assert result.details["error_count"] == 2
+    assert result.details["user_pages_completed"] == 5
+    assert failed == ("failed-before-rollover",)
 
 
 @pytest.mark.asyncio
@@ -462,6 +550,83 @@ async def test_resource_page_limit_is_preserved_across_continue_as_new() -> None
         "finished": False,
         "error_count": 2,
     }
+
+
+@pytest.mark.asyncio
+async def test_resource_page_failure_checkpoints_the_failed_input_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = ResourcePagesWorkflow()
+
+    class FailedPageHandle:
+        id = "files-page/failed"
+
+        def __await__(self):  # type: ignore[no-untyped-def]
+            async def finish() -> PageResult:
+                return PageResult(
+                    page_key="failed",
+                    status=ResultStatus.PARTIAL,
+                    errors=("document ingest failed",),
+                )
+
+            return finish().__await__()
+
+        def cancel(self) -> None:
+            raise AssertionError("completed failed child must not be canceled")
+
+    async def fetch(
+        _command: ResourcePagesInput,
+        cursor: str | None,
+        **_options: object,
+    ) -> ResourcePageManifest:
+        assert cursor == "retry-here"
+        return ResourcePageManifest(
+            request_id="request",
+            page_key="failed",
+            next_cursor="after-failed-page",
+        )
+
+    async def start(
+        _command: ResourcePagesInput,
+        _manifest: ResourcePageManifest,
+    ) -> FailedPageHandle:
+        return FailedPageHandle()
+
+    async def wait_for_page(
+        handles: list[FailedPageHandle],
+        **_options: object,
+    ) -> tuple[set[FailedPageHandle], set[FailedPageHandle]]:
+        return set(handles), set()
+
+    pages._fetch_manifest = fetch  # type: ignore[method-assign]
+    pages._start_page_child = start  # type: ignore[method-assign]
+    monkeypatch.setattr(resource_pages_module.workflow, "wait", wait_for_page)
+    monkeypatch.setattr(
+        resource_pages_module.workflow,
+        "info",
+        lambda: SimpleNamespace(is_continue_as_new_suggested=lambda: False),
+    )
+
+    result = await pages.run(
+        ResourcePagesInput(
+            store_key="opaque-store",
+            lifecycle_generation=3,
+            sync_sequence="sync",
+            user_key="user",
+            resource_key="files",
+            next_page_cursor="retry-here",
+            files_page_window_size=1,
+        )
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.progress.pages_completed == 0
+    assert result.details == {
+        "next_cursor": "retry-here",
+        "finished": False,
+        "error_count": 1,
+    }
+    assert result.errors == ("document ingest failed",)
 
 
 @pytest.mark.asyncio

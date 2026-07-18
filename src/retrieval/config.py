@@ -9,6 +9,8 @@ from dataclasses import dataclass, fields
 from datetime import timedelta
 from types import MappingProxyType
 
+from retrieval.temporal.models.quota import MAX_QUOTA_PENDING_REQUESTS
+
 
 class ConfigurationError(ValueError):
     """Raised when a retrieval environment variable is invalid."""
@@ -71,7 +73,7 @@ def _parse_duration(environ: Mapping[str, str], name: str, default: timedelta) -
 
 @dataclass(frozen=True)
 class RetrievalTemporalConfig:
-    """All bounded-concurrency and Temporal V2 feature settings.
+    """All bounded-concurrency and Temporal workflow feature settings.
 
     Defaults are deliberately finite.  ``from_env`` is the only place that
     reads process environment, which keeps workflow modules deterministic and
@@ -87,6 +89,7 @@ class RetrievalTemporalConfig:
     files_per_page_concurrency: int = 10
     document_ingestion_concurrency: int = 20
     user_quota_max_in_flight: int = 4
+    user_quota_max_pending_requests: int = MAX_QUOTA_PENDING_REQUESTS
     user_quota_dedup_window_size: int = 2_000
     user_quota_continue_as_new_message_count: int = 10_000
     deactivation_drain_timeout: timedelta = DEFAULT_DEACTIVATION_DRAIN_TIMEOUT
@@ -105,6 +108,7 @@ class RetrievalTemporalConfig:
             "files_per_page_concurrency",
             "document_ingestion_concurrency",
             "user_quota_max_in_flight",
+            "user_quota_max_pending_requests",
             "user_quota_dedup_window_size",
             "user_quota_continue_as_new_message_count",
         )
@@ -126,6 +130,15 @@ class RetrievalTemporalConfig:
         if self.user_quota_dedup_window_size < self.user_quota_max_in_flight:
             raise ConfigurationError(
                 "user_quota_dedup_window_size must be at least user_quota_max_in_flight"
+            )
+        if self.user_quota_max_pending_requests < self.user_quota_max_in_flight:
+            raise ConfigurationError(
+                "user_quota_max_pending_requests must be at least user_quota_max_in_flight"
+            )
+        if self.user_quota_max_pending_requests > MAX_QUOTA_PENDING_REQUESTS:
+            raise ConfigurationError(
+                "user_quota_max_pending_requests must not exceed "
+                f"{MAX_QUOTA_PENDING_REQUESTS} to keep workflow payloads bounded"
             )
 
     @property
@@ -179,6 +192,11 @@ class RetrievalTemporalConfig:
                 source,
                 "USER_QUOTA_MAX_IN_FLIGHT",
                 defaults.user_quota_max_in_flight,
+            ),
+            user_quota_max_pending_requests=_parse_int(
+                source,
+                "USER_QUOTA_MAX_PENDING_REQUESTS",
+                defaults.user_quota_max_pending_requests,
             ),
             user_quota_dedup_window_size=_parse_int(
                 source,

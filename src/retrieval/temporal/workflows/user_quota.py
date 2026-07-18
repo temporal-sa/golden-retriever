@@ -19,10 +19,12 @@ from typing import Any, TypeVar
 
 from retrieval.temporal.common.ids import permit_id
 from retrieval.temporal.models.quota import (
+    MAX_QUOTA_PENDING_REQUESTS,
     CancelGenerationPermits,
     CancelPermit,
     DisableQuotaScope,
     PermitCompleted,
+    PermitDenied,
     PermitGrant,
     PermitRequest,
     PermitReservation,
@@ -57,6 +59,7 @@ DEFAULT_DEDUP_WINDOW_SIZE = 2_000
 DEFAULT_CONTINUE_AS_NEW_MESSAGE_COUNT = 10_000
 DEFAULT_UNKNOWN_RESET_PROBE_DELAY = timedelta(seconds=60)
 QUOTA_GRANTED_SIGNAL = "quota_granted"
+QUOTA_DENIED_SIGNAL = "quota_denied"
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -153,8 +156,8 @@ def compact_quota_state(
         if request_id in state.pending and request_id not in seen:
             compact_order.append(request_id)
             seen.add(request_id)
-    # A legacy or manually constructed state may contain pending entries that
-    # predate ``pending_order``.  Sorting only this repair tail is deterministic.
+    # A manually constructed or restored state may contain pending entries with
+    # no ``pending_order`` entry. Sorting only this repair tail is deterministic.
     compact_order.extend(sorted(set(state.pending) - seen))
     state.pending_order = compact_order
 
@@ -164,7 +167,7 @@ def compact_quota_state(
         if request_id in state.recent_terminal_request_ids and request_id not in seen_terminal:
             terminal_order.append(request_id)
             seen_terminal.add(request_id)
-    # Repair pre-order state deterministically once, then preserve true arrival
+    # Repair state that lacks an order list once, then preserve true arrival
     # order for every subsequent terminal request.
     terminal_order.extend(sorted(set(state.recent_terminal_request_ids) - seen_terminal))
     state.recent_terminal_request_order = terminal_order
@@ -177,6 +180,51 @@ def compact_quota_state(
     return state
 
 
+def permit_request_denial(
+    state: UserQuotaState,
+    request: PermitRequest,
+) -> PermitDenied | None:
+    """Return an explicit denial for a new request that cannot be queued.
+
+    Existing request IDs are idempotent duplicates and therefore return no
+    denial; their original grant, cancellation, or denial remains authoritative.
+    """
+
+    request_id = request.request_id
+    if (
+        request_id in state.pending
+        or request_id in state.reservations
+        or request_id in state.recent_terminal_request_ids
+    ):
+        return None
+    if not request_id:
+        return PermitDenied(request_id, request.quota_scope, "request_id must not be empty")
+    if request.cost <= 0:
+        return PermitDenied(request_id, request.quota_scope, "permit cost must be positive")
+    if request.quota_scope != state.quota_scope:
+        return PermitDenied(
+            request_id,
+            request.quota_scope,
+            "quota scope does not match coordinator",
+        )
+    if not request.requester_workflow_id:
+        return PermitDenied(request_id, request.quota_scope, "requester workflow ID is required")
+    if state.disabled:
+        return PermitDenied(request_id, request.quota_scope, "quota scope is disabled")
+    effective_max_pending = min(
+        max(1, state.max_pending_requests),
+        MAX_QUOTA_PENDING_REQUESTS,
+    )
+    if len(state.pending) >= effective_max_pending:
+        return PermitDenied(
+            request_id,
+            request.quota_scope,
+            "quota pending queue is at capacity",
+            retryable=True,
+        )
+    return None
+
+
 def apply_permit_request(state: UserQuotaState, request: PermitRequest) -> bool:
     """Idempotently append a valid request to the FIFO queue.
 
@@ -186,11 +234,8 @@ def apply_permit_request(state: UserQuotaState, request: PermitRequest) -> bool:
 
     state.processed_message_count += 1
     request_id = request.request_id
-    if (
-        not request_id
-        or request.cost <= 0
-        or request.quota_scope != state.quota_scope
-        or request_id in state.pending
+    if permit_request_denial(state, request) is not None or (
+        request_id in state.pending
         or request_id in state.reservations
         or request_id in state.recent_terminal_request_ids
     ):
@@ -497,6 +542,10 @@ def quota_snapshot(state: UserQuotaState) -> QuotaSnapshot:
         reset_at=state.reset_at,
         blocked_until=state.blocked_until,
         max_in_flight=state.max_in_flight,
+        max_pending_requests=min(
+            max(1, state.max_pending_requests),
+            MAX_QUOTA_PENDING_REQUESTS,
+        ),
         in_flight=state.in_flight,
         disabled=state.disabled,
         pending_count=len(state.pending),
@@ -514,6 +563,7 @@ class UserQuotaWorkflow:
         self._dirty = True
         self._continue_after_window = False
         self._deferred_messages: list[tuple[str, Any, datetime | None]] = []
+        self._pending_denials: list[tuple[str, PermitDenied]] = []
 
     def _apply_or_defer(
         self,
@@ -538,7 +588,10 @@ class UserQuotaWorkflow:
         if self._state is None:  # Defensive guard for direct unit invocation.
             raise RuntimeError("quota workflow state is not initialized")
         if message_type == "request":
+            denial = permit_request_denial(self._state, message)
             accepted = apply_permit_request(self._state, message)
+            if denial is not None and message.requester_workflow_id:
+                self._pending_denials.append((message.requester_workflow_id, denial))
             if workflow is not None:
                 workflow_metrics(
                     provider=self._state.quota_scope.provider,
@@ -546,7 +599,15 @@ class UserQuotaWorkflow:
                     work_class=message.work_class,
                 ).increment(
                     QUOTA_REQUESTS,
-                    attributes={"status": "accepted" if accepted else "ignored"},
+                    attributes={
+                        "status": (
+                            "accepted"
+                            if accepted
+                            else "denied"
+                            if denial is not None
+                            else "ignored"
+                        )
+                    },
                 )
         elif message_type == "cancel":
             apply_cancel_permit(self._state, message)
@@ -559,7 +620,27 @@ class UserQuotaWorkflow:
                 raise RuntimeError("quota observation requires workflow time")
             apply_quota_observation(self._state, message, now=now)
         elif message_type == "disable":
-            apply_disable_scope(self._state, message)
+            pending_requests = [
+                self._state.pending[request_id]
+                for request_id in self._state.pending_order
+                if request_id in self._state.pending
+            ]
+            changed = apply_disable_scope(self._state, message)
+            if changed:
+                self._state.pending.clear()
+                self._state.pending_order.clear()
+                for request in pending_requests:
+                    _mark_terminal(self._state, request.request_id)
+                    self._pending_denials.append(
+                        (
+                            request.requester_workflow_id,
+                            PermitDenied(
+                                request.request_id,
+                                request.quota_scope,
+                                "quota scope was disabled while request was pending",
+                            ),
+                        )
+                    )
         else:  # pragma: no cover - all call sites use constants above
             raise ValueError(f"unknown quota message type: {message_type}")
         self._dirty = True
@@ -643,6 +724,22 @@ class UserQuotaWorkflow:
                 type(exc).__name__,
             )
 
+    async def _deliver_denial(self, requester_workflow_id: str, denial: PermitDenied) -> None:
+        if workflow is None:  # pragma: no cover
+            raise RuntimeError("Temporal SDK is required to deliver a denial")
+        try:
+            await workflow.get_external_workflow_handle(requester_workflow_id).signal(
+                QUOTA_DENIED_SIGNAL,
+                denial,
+            )
+        except TemporalError as exc:
+            workflow.logger.warning(
+                "Failed to deliver quota denial request_id=%s requester=%s: %s",
+                denial.request_id,
+                requester_workflow_id,
+                type(exc).__name__,
+            )
+
     @_workflow_run
     async def run(self, initial_state: UserQuotaState) -> None:
         if workflow is None:  # pragma: no cover - pure logic remains usable
@@ -686,11 +783,14 @@ class UserQuotaWorkflow:
 
             # Clear before awaiting delivery so a concurrently handled Signal
             # cannot be overwritten and lost.
+            denials, self._pending_denials = self._pending_denials, []
             self._dirty = False
             for grant in grants:
                 await self._deliver_grant(grant)
+            for requester_workflow_id, denial in denials:
+                await self._deliver_denial(requester_workflow_id, denial)
 
-            if self._should_continue_as_new():
+            if self._should_continue_as_new() and not self._pending_denials:
                 compact_quota_state(self._state)
                 self._state.processed_message_count = 0
                 workflow.continue_as_new(self._state)
@@ -717,6 +817,7 @@ __all__ = [
     "DEFAULT_CONTINUE_AS_NEW_MESSAGE_COUNT",
     "DEFAULT_DEDUP_WINDOW_SIZE",
     "DEFAULT_UNKNOWN_RESET_PROBE_DELAY",
+    "QUOTA_DENIED_SIGNAL",
     "QUOTA_GRANTED_SIGNAL",
     "UserQuotaWorkflow",
     "advance_due_quota_window",
@@ -729,6 +830,7 @@ __all__ = [
     "compact_quota_state",
     "grant_available_permits",
     "next_quota_timer_delay",
+    "permit_request_denial",
     "quota_is_blocked",
     "quota_snapshot",
 ]

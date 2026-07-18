@@ -21,6 +21,7 @@ with workflow.unsafe.imports_passed_through():
     from retrieval.temporal.models.quota import PermitRequest
     from retrieval.temporal.models.sync import (
         FilesPageInput,
+        PageResult,
         ResourcePagesInput,
         SyncProgress,
         SyncResult,
@@ -154,6 +155,7 @@ class ResourcePagesWorkflow(QuotaWaiterMixin):
             "FilesPageWorkflow",
             child_input,
             id=files_page_workflow_id(workflow.info().workflow_id, manifest.page_key),
+            result_type=PageResult,
             cancellation_type=workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
         )
 
@@ -163,8 +165,9 @@ class ResourcePagesWorkflow(QuotaWaiterMixin):
         self._cursor = command.next_page_cursor
         cursor = command.next_page_cursor
         may_fetch = True
-        pending: set[workflow.ChildWorkflowHandle] = set()
+        pending: dict[workflow.ChildWorkflowHandle, tuple[int, str | None]] = {}
         errors: list[str] = []
+        failures: list[tuple[int, str | None]] = []
         pages_started = 0
         page_fetch_attempt = command.page_fetch_attempt
         stop_for_continue_as_new = False
@@ -193,8 +196,9 @@ class ResourcePagesWorkflow(QuotaWaiterMixin):
                         stop_for_continue_as_new = True
                         break
                     page_fetch_attempt = 0
+                    page_cursor = cursor
                     handle = await self._start_page_child(command, manifest)
-                    pending.add(handle)
+                    pending[handle] = (pages_started, page_cursor)
                     self._pending_children = len(pending)
                     pages_started += 1
                     cursor = manifest.next_cursor
@@ -208,25 +212,35 @@ class ResourcePagesWorkflow(QuotaWaiterMixin):
 
                 if not pending:
                     break
-                done, still_pending = await workflow.wait(
+                done, _still_pending = await workflow.wait(
                     sorted(pending, key=lambda handle: handle.id),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                pending = set(still_pending)
-                self._pending_children = len(pending)
                 for handle in sorted(done, key=lambda item: item.id):
+                    sequence, page_cursor = pending.pop(handle)
                     try:
-                        result = await handle
+                        result: PageResult = await handle
                     except asyncio.CancelledError:
                         raise
                     except BaseException as exc:
                         errors.append(type(exc).__name__)
+                        failures.append((sequence, page_cursor))
+                        may_fetch = False
+                        stop_for_continue_as_new = False
                     else:
-                        self._pages_completed += 1
-                        errors.extend(getattr(result, "errors", ()))
+                        result_status = getattr(result, "status", ResultStatus.SUCCEEDED)
+                        if result_status is ResultStatus.SUCCEEDED and not result.errors:
+                            self._pages_completed += 1
+                        else:
+                            result_errors = result.errors or (result_status.value,)
+                            errors.extend(result_errors)
+                            failures.append((sequence, page_cursor))
+                            may_fetch = False
+                            stop_for_continue_as_new = False
+                self._pending_children = len(pending)
 
             # A Continue-As-New boundary is legal only after every page child drained.
-            if stop_for_continue_as_new:
+            if stop_for_continue_as_new and not failures:
                 workflow.continue_as_new(
                     replace(
                         command,
@@ -245,7 +259,8 @@ class ResourcePagesWorkflow(QuotaWaiterMixin):
             raise
 
         self._phase = "completed"
-        finished = cursor is None
+        checkpoint_cursor = min(failures, key=lambda failure: failure[0])[1] if failures else cursor
+        finished = not failures and cursor is None
         total_error_count = command.prior_error_count + len(errors)
         return SyncResult(
             store_key=command.store_key,
@@ -256,11 +271,11 @@ class ResourcePagesWorkflow(QuotaWaiterMixin):
                 phase="completed",
                 pages_completed=command.completed_page_count + self._pages_completed,
                 pending_children=0,
-                cursor=cursor,
+                cursor=checkpoint_cursor,
             ),
             errors=tuple(errors),
             details={
-                "next_cursor": cursor,
+                "next_cursor": checkpoint_cursor,
                 "finished": finished,
                 "error_count": total_error_count,
             },

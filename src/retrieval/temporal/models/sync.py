@@ -1,4 +1,4 @@
-"""Compact inputs and results for the preserved sync workflow boundaries."""
+"""Compact inputs and results for the sync workflow boundaries."""
 
 from __future__ import annotations
 
@@ -64,10 +64,16 @@ class StoreSyncInput:
     enable_search_attributes: bool = False
     prior_error_count: int = 0
     user_page_attempt: int = 0
+    prior_users_completed: int = 0
+    prior_users_failed: int = 0
+    user_pages_completed: int = 0
+    error_sample: tuple[str, ...] = ()
+    remediation_workflow_count: int = 0
+    remediation_workflow_id_sample: tuple[str, ...] = ()
+    failed_user_keys_remediated: bool = False
 
 
-# The specification uses both names for the root role.  They intentionally
-# share one wire shape.
+# Both public names for the root role intentionally share one wire shape.
 RootSyncInput = StoreSyncInput
 
 

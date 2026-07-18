@@ -150,3 +150,24 @@ def test_quota_models_round_trip_through_temporal_default_converter() -> None:
     decoded = asyncio.run(round_trip())
     assert decoded == state
     assert decoded.pending[request.request_id].requested_at == request.requested_at
+
+
+def test_maximum_quota_pending_state_stays_below_temporal_payload_limit() -> None:
+    scope = QuotaScope("provider", "credential-" + "c" * 128, "reads")
+    state = UserQuotaState(quota_scope=scope, max_pending_requests=350)
+    for index in range(state.max_pending_requests):
+        request_id = f"request-{index:04d}-" + "r" * 128
+        state.pending_order.append(request_id)
+        state.pending[request_id] = PermitRequest(
+            request_id=request_id,
+            requester_workflow_id="workflow/" + "w" * 256,
+            store_key="store/" + "s" * 256,
+            lifecycle_generation=2,
+            quota_scope=scope,
+        )
+
+    async def encode() -> int:
+        [payload] = await DataConverter.default.encode([state])
+        return len(payload.data)
+
+    assert asyncio.run(encode()) < 2_000_000

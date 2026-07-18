@@ -308,6 +308,12 @@ class StoreControllerWorkflow:
                 type="SyncAlreadyRunning",
                 non_retryable=True,
             )
+        if self._state.active_remediations:
+            raise ApplicationError(
+                "failed-user remediation is still active for this store",
+                type="RemediationAlreadyRunning",
+                non_retryable=True,
+            )
 
         sync_input = self._sync_input(command)
         workflow_id = store_sync_workflow_id(
@@ -582,11 +588,12 @@ class StoreControllerWorkflow:
                 # start must not strand the logical controller in DEACTIVATING.
                 self._state.lifecycle_state = (
                     StoreLifecycleState.SYNCING
-                    if self._state.active_syncs
+                    if self._state.active_syncs or self._state.active_remediations
                     else StoreLifecycleState.ACTIVE
                 )
         elif (
             not self._state.active_syncs
+            and not self._state.active_remediations
             and self._state.lifecycle_state is StoreLifecycleState.SYNCING
         ):
             self._state.lifecycle_state = StoreLifecycleState.ACTIVE
@@ -609,6 +616,8 @@ class StoreControllerWorkflow:
             status=event.status,
             started_at=workflow.now(),
         )
+        if self._state.lifecycle_state is StoreLifecycleState.ACTIVE:
+            self._state.lifecycle_state = StoreLifecycleState.SYNCING
         if self._state.lifecycle_state in {
             StoreLifecycleState.DEACTIVATING,
             StoreLifecycleState.INACTIVE,
@@ -663,7 +672,8 @@ class StoreControllerWorkflow:
         self._state.lifecycle_generation = result.authoritative_generation
         self._state.lifecycle_state = (
             StoreLifecycleState.SYNCING
-            if result.lifecycle_state is StoreLifecycleState.ACTIVE and self._state.active_syncs
+            if result.lifecycle_state is StoreLifecycleState.ACTIVE
+            and (self._state.active_syncs or self._state.active_remediations)
             else result.lifecycle_state
         )
         self._state.authority_initialized = True

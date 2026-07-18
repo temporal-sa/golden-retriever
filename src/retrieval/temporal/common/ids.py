@@ -102,14 +102,18 @@ def store_sync_workflow_id(store_key: str, lifecycle_generation: int, sync_seque
 
 
 def failed_user_remediation_workflow_id(
-    store_key: str, lifecycle_generation: int, sync_sequence: Any
+    store_key: str,
+    lifecycle_generation: int,
+    sync_sequence: Any,
+    partition: Any | None = None,
 ) -> str:
+    identity = sync_sequence if partition is None else (sync_sequence, partition)
     return "/".join(
         (
             "failed-user-remediation",
             opaque_store_key(store_key),
             _generation(lifecycle_generation),
-            _component(sync_sequence, namespace="sync-sequence"),
+            _component(identity, namespace="sync-sequence"),
         )
     )
 

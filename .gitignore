@@ -10,4 +10,4 @@ build/
 *.egg-info/
 .env
 artifacts/histories/*.json
-
+!artifacts/histories/root-sync-replay-smoke.json

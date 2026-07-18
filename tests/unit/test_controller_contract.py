@@ -9,7 +9,11 @@ from temporalio.exceptions import ApplicationError
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from retrieval.temporal.common.ids import store_sync_workflow_id
-from retrieval.temporal.models.lifecycle import StoreControllerState
+from retrieval.temporal.models.lifecycle import (
+    RemediationRegistration,
+    StoreControllerState,
+    StoreLifecycleState,
+)
 from retrieval.temporal.models.operations import SyncCommand
 from retrieval.temporal.worker import V2_WORKFLOW_TYPES
 from retrieval.temporal.workflows import store_controller as controller_module
@@ -39,14 +43,14 @@ WORKFLOW_CONTRACTS = (
     (
         RootSyncWorkflow,
         "RootSyncWorkflow",
-        {"quota_granted"},
+        {"quota_denied", "quota_granted"},
         {"get_progress"},
         set(),
     ),
     (
         ResourcePagesWorkflow,
         "ResourcePagesWorkflow",
-        {"quota_granted"},
+        {"quota_denied", "quota_granted"},
         {"get_progress"},
         set(),
     ),
@@ -188,6 +192,38 @@ async def test_controller_starts_sync_once_with_stable_opaque_id_and_abandon_pol
     assert options["cancellation_type"] is workflow.ChildWorkflowCancellationType.ABANDON
     assert options["search_attributes"] is not None
     assert state.store_key not in expected_id
+
+
+@pytest.mark.asyncio
+async def test_controller_rejects_sync_while_remediation_is_active() -> None:
+    remediation_id = "failed-user-remediation/active"
+    state = StoreControllerState(
+        store_key="opaque-store",
+        lifecycle_state=StoreLifecycleState.SYNCING,
+        lifecycle_generation=4,
+        active_remediations={
+            remediation_id: RemediationRegistration(
+                operation_id=remediation_id,
+                workflow_id=remediation_id,
+                lifecycle_generation=4,
+                sync_sequence="sync-before",
+            )
+        },
+        authority_initialized=True,
+    )
+    controller = StoreControllerWorkflow(state)
+
+    with pytest.raises(ApplicationError, match="remediation is still active") as raised:
+        await controller._request_sync(
+            SyncCommand(
+                command_id="new-command",
+                store_key=state.store_key,
+                expected_generation=4,
+                sync_sequence="sync-after",
+            )
+        )
+
+    assert raised.value.type == "RemediationAlreadyRunning"
 
 
 @pytest.mark.asyncio

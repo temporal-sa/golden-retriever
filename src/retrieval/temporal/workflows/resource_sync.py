@@ -43,6 +43,7 @@ class ResourceSyncWorkflow:
                 provider_task_queue=command.provider_task_queue,
                 priority_fairness_enabled=command.priority_fairness_enabled,
             ),
+            result_type=SyncResult,
             cancellation_type=workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
         )
         self._phase = "completed"

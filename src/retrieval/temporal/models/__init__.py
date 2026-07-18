@@ -40,10 +40,12 @@ from .operations import (
     WorkClass,
 )
 from .quota import (
+    MAX_QUOTA_PENDING_REQUESTS,
     CancelGenerationPermits,
     CancelPermit,
     DisableQuotaScope,
     PermitCompleted,
+    PermitDenied,
     PermitGrant,
     PermitRequest,
     PermitReservation,
@@ -72,6 +74,7 @@ from .sync import (
 )
 
 __all__ = [
+    "MAX_QUOTA_PENDING_REQUESTS",
     "ActivateUserInput",
     "BeginStoreDeactivation",
     "CancelGenerationPermits",
@@ -103,6 +106,7 @@ __all__ = [
     "OperationType",
     "PageResult",
     "PermitCompleted",
+    "PermitDenied",
     "PermitGrant",
     "PermitRequest",
     "PermitReservation",

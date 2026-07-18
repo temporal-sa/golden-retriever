@@ -1,8 +1,7 @@
-"""Drain-only names for deployments that still host legacy executions.
+"""Optional drain-only names for deployments with existing workflow histories.
 
-These greenfield placeholders are never started by V2. Real migrations must keep the
-original worker build pinned until its real histories drain; a placeholder cannot replay
-code that was not supplied with this repository.
+Normal execution never starts these placeholders. They cannot replay Event Histories created by
+a different implementation, so those executions must remain pinned to a compatible worker build.
 """
 
 from __future__ import annotations

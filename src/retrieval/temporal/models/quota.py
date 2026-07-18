@@ -8,6 +8,8 @@ from enum import StrEnum
 
 from .operations import WorkClass
 
+MAX_QUOTA_PENDING_REQUESTS = 350
+
 
 @dataclass(frozen=True)
 class QuotaScope:
@@ -87,6 +89,21 @@ class PermitGrant:
 
 
 @dataclass(frozen=True)
+class PermitDenied:
+    """Explicit negative acknowledgement for a permit request.
+
+    A coordinator must never silently drop a request that its caller is
+    durably waiting on. Capacity and administrative rejections therefore use
+    this signal payload instead of leaving the requester parked forever.
+    """
+
+    request_id: str
+    quota_scope: QuotaScope
+    reason: str
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
 class QuotaObservation:
     quota_scope: QuotaScope
     request_id: str
@@ -111,6 +128,7 @@ class UserQuotaState:
     reset_at: datetime | None = None
     blocked_until: datetime | None = None
     max_in_flight: int = 1
+    max_pending_requests: int = MAX_QUOTA_PENDING_REQUESTS
     in_flight: int = 0
     disabled: bool = False
     pending: dict[str, PermitRequest] = field(default_factory=dict)
@@ -136,6 +154,7 @@ class QuotaSnapshot:
     reset_at: datetime | None
     blocked_until: datetime | None
     max_in_flight: int
+    max_pending_requests: int
     in_flight: int
     disabled: bool
     pending_count: int
