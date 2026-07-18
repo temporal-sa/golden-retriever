@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "temporal-retrieval-v2"
+version = "0.1.0"
+description = "Reference implementation of a generation-fenced Temporal retrieval workflow topology"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "temporalio==1.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+retrieval-worker = "retrieval.temporal.worker:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/retrieval"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "integration: requires a running Temporal development server",
+  "replay: replays exported Temporal histories",
+  "load: opt-in load-test scaffolding",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+ignore = ["B008"]
