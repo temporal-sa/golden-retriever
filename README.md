@@ -10,6 +10,9 @@ workflow histories, connector algorithms, persistence adapter, namespace configu
 or deployment version to preserve. Those facts and the resulting migration seam are
 recorded in [`IMPLEMENTATION_MAP.md`](IMPLEMENTATION_MAP.md).
 
+See [`docs/workflow-topology.md`](docs/workflow-topology.md) for the complete workflow,
+Activity, quota, and deactivation diagrams.
+
 ## Setup
 
 Python 3.11 or newer and [uv](https://docs.astral.sh/uv/) are required. Install the project and

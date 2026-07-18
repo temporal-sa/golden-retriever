@@ -28,6 +28,9 @@ exported histories before production cutover.
 
 ## V2 logical inventory and source map
 
+The execution relationships between these components are diagrammed in
+[`docs/workflow-topology.md`](docs/workflow-topology.md).
+
 | Logical component | Workflow implementation | Main responsibilities |
 |---|---|---|
 | Store controller | `workflows/store_controller.py` | lifecycle state, operation registry, bounded command dedup, cancellation decisions |
