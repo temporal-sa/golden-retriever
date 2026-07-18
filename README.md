@@ -44,7 +44,7 @@ StoreControllerWorkflow
         └── ResourceSyncWorkflow
             └── ResourcePagesWorkflow
                 └── FilesPageWorkflow
-                    └── DocumentIngestionWorkflow
+                    └── DocumentIngestionWorkflow (Potentially Optional)
 ```
 
 Fan-out is bounded and joined at every level. Provider response bodies never enter Workflow Event
