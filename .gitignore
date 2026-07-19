@@ -8,6 +8,9 @@ htmlcov/
 dist/
 build/
 *.egg-info/
-.env
+.env*
+*.env
+!.env.example
 artifacts/histories/*.json
 !artifacts/histories/root-sync-replay-smoke.json
+!artifacts/histories/remove-objects-pre-batch.json

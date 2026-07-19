@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +17,9 @@ from retrieval.temporal.models.lifecycle import (
     SyncRegistration,
 )
 from retrieval.temporal.models.operations import (
+    CommandResult,
     OperationStatus,
+    OperationType,
     ResultStatus,
     StartDeactivationCommand,
 )
@@ -62,6 +65,122 @@ async def test_pre_fence_terminal_failure_restores_active_state() -> None:
     assert state.active_deactivation_id is None
     assert state.lifecycle_generation == 4
     assert state.lifecycle_state is StoreLifecycleState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_terminal_signal_updates_bounded_operation_query_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        controller_module.workflow,
+        "now",
+        lambda: datetime(2026, 7, 18, tzinfo=UTC),
+    )
+    operation_id = "store-sync/operation"
+    state = StoreControllerState(
+        store_key="store",
+        lifecycle_state=StoreLifecycleState.SYNCING,
+        lifecycle_generation=4,
+        active_syncs={
+            operation_id: SyncRegistration(
+                operation_id=operation_id,
+                workflow_id=operation_id,
+                lifecycle_generation=4,
+                sync_sequence="sequence",
+            )
+        },
+        recent_command_results={
+            "command": CommandResult(
+                command_id="command",
+                operation_id=operation_id,
+                workflow_id=operation_id,
+                operation_type=OperationType.SYNC,
+                status=OperationStatus.ACCEPTED,
+                lifecycle_generation=4,
+            )
+        },
+        authority_initialized=True,
+    )
+    controller = StoreControllerWorkflow(state)
+
+    await controller._operation_status(
+        OperationStatusEvent(
+            operation_id=operation_id,
+            workflow_id=operation_id,
+            lifecycle_generation=4,
+            status=OperationStatus.FAILED,
+            result_status=ResultStatus.FAILED,
+            message="provider failed",
+        )
+    )
+
+    result = controller.get_operation_result(operation_id)
+    assert result is not None
+    assert result.status is OperationStatus.FAILED
+    assert result.result_status is ResultStatus.FAILED
+    assert result.message == "provider failed"
+
+
+@pytest.mark.asyncio
+async def test_operation_query_ignores_cancellation_command_with_same_operation_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        controller_module.workflow,
+        "now",
+        lambda: datetime(2026, 7, 18, tzinfo=UTC),
+    )
+    operation_id = "store-sync/operation"
+    state = StoreControllerState(
+        store_key="store",
+        lifecycle_state=StoreLifecycleState.SYNCING,
+        lifecycle_generation=4,
+        active_syncs={
+            operation_id: SyncRegistration(
+                operation_id=operation_id,
+                workflow_id=operation_id,
+                lifecycle_generation=4,
+                sync_sequence="sequence",
+            )
+        },
+        recent_command_results={
+            "sync-command": CommandResult(
+                command_id="sync-command",
+                operation_id=operation_id,
+                workflow_id=operation_id,
+                operation_type=OperationType.SYNC,
+                status=OperationStatus.ACCEPTED,
+                lifecycle_generation=4,
+            ),
+            "cancel-command": CommandResult(
+                command_id="cancel-command",
+                operation_id=operation_id,
+                workflow_id=operation_id,
+                operation_type=OperationType.SYNC,
+                status=OperationStatus.COMPLETED,
+                lifecycle_generation=4,
+                details={"kind": "cancellation"},
+            ),
+        },
+        authority_initialized=True,
+    )
+    controller = StoreControllerWorkflow(state)
+
+    await controller._operation_status(
+        OperationStatusEvent(
+            operation_id=operation_id,
+            workflow_id=operation_id,
+            lifecycle_generation=4,
+            status=OperationStatus.CANCELED,
+            result_status=ResultStatus.CANCELED,
+        )
+    )
+
+    result = controller.get_operation_result(operation_id)
+    assert result is not None
+    assert result.command_id == "sync-command"
+    assert result.status is OperationStatus.CANCELED
+    assert state.recent_command_results["cancel-command"].status is OperationStatus.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -269,6 +388,50 @@ async def test_controller_authority_bootstrap_preserves_active_sync_state(
     await controller._initialize_authority()
 
     assert state.lifecycle_state is StoreLifecycleState.SYNCING
+
+
+@pytest.mark.asyncio
+async def test_authority_bootstrap_recovers_fence_signal_lost_across_continue_as_new(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation_id = "store-deactivation/generation-8"
+    state = StoreControllerState(
+        store_key="store",
+        lifecycle_state=StoreLifecycleState.DEACTIVATING,
+        lifecycle_generation=7,
+        active_deactivation_id=operation_id,
+        active_deactivation_fenced=False,
+    )
+    controller = StoreControllerWorkflow(state)
+
+    async def fake_execute_activity(
+        _name: str, _fence: object, **_options: object
+    ) -> LifecycleMutationResult:
+        return LifecycleMutationResult(
+            store_key="store",
+            expected_generation=7,
+            authoritative_generation=8,
+            status=ResultStatus.STALE_GENERATION,
+            lifecycle_state=StoreLifecycleState.DEACTIVATING,
+        )
+
+    monkeypatch.setattr(controller_module.workflow, "execute_activity", fake_execute_activity)
+
+    await controller._initialize_authority()
+    assert state.active_deactivation_fenced is True
+    await controller._operation_status(
+        OperationStatusEvent(
+            operation_id=operation_id,
+            workflow_id=operation_id,
+            lifecycle_generation=8,
+            status=OperationStatus.FAILED,
+            result_status=ResultStatus.FAILED,
+        )
+    )
+
+    assert state.active_deactivation_fenced is False
+    assert state.lifecycle_generation == 8
+    assert state.lifecycle_state is StoreLifecycleState.DEACTIVATION_FAILED
 
 
 class _UnavailableExternalHandle:

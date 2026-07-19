@@ -1,0 +1,83 @@
+bundle:
+  name: lakebase-temporal-demo-app
+  databricks_cli_version: ">= 0.299.0"
+
+variables:
+  lakebase_branch:
+    description: Full Lakebase branch resource name (projects/.../branches/...)
+  lakebase_database:
+    description: Full Lakebase database resource name (projects/.../branches/.../databases/...)
+  temporal_secret_scope:
+    description: Databricks secret scope containing the Temporal connection values
+  temporal_address_secret_key:
+    description: Secret key containing host:port for Temporal Cloud
+    default: temporal-address
+  temporal_namespace_secret_key:
+    description: Secret key containing the Temporal namespace
+    default: temporal-namespace
+  temporal_api_key_secret_key:
+    description: Secret key containing the Temporal API key
+    default: temporal-api-key
+
+resources:
+  apps:
+    retrieval_demo:
+      name: lakebase-temporal-demo
+      description: Generation-fenced retrieval demo backed by Lakebase and Temporal
+      source_code_path: ../..
+      resources:
+        - name: postgres
+          postgres:
+            branch: ${var.lakebase_branch}
+            database: ${var.lakebase_database}
+            permission: CAN_CONNECT_AND_CREATE
+        - name: temporal-address
+          secret:
+            scope: ${var.temporal_secret_scope}
+            key: ${var.temporal_address_secret_key}
+            permission: READ
+        - name: temporal-namespace
+          secret:
+            scope: ${var.temporal_secret_scope}
+            key: ${var.temporal_namespace_secret_key}
+            permission: READ
+        - name: temporal-api-key
+          secret:
+            scope: ${var.temporal_secret_scope}
+            key: ${var.temporal_api_key_secret_key}
+            permission: READ
+      config:
+        command:
+          - python
+          - -m
+          - apps.retrieval_demo.app
+        env:
+          - name: LAKEBASE_ENDPOINT
+            value_from: postgres
+          - name: TEMPORAL_ADDRESS
+            value_from: temporal-address
+          - name: TEMPORAL_NAMESPACE
+            value_from: temporal-namespace
+          - name: TEMPORAL_API_KEY
+            value_from: temporal-api-key
+          - name: TEMPORAL_TLS
+            value: "true"
+          - name: TEMPORAL_RETRIEVAL_TASK_QUEUE
+            value: retrieval-v2
+          - name: TEMPORAL_PROVIDER_TASK_QUEUE
+            value: retrieval-provider-v2
+          - name: RETRIEVAL_DEMO_MODE
+            value: "true"
+          - name: RETRIEVAL_SEARCH_BACKEND
+            value: postgres_text
+          - name: LAKEBASE_POOL_MIN_SIZE
+            value: "1"
+          - name: LAKEBASE_POOL_MAX_SIZE
+            value: "10"
+
+targets:
+  dev:
+    default: true
+    mode: development
+  prod:
+    mode: production

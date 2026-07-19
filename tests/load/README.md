@@ -59,8 +59,8 @@ distribution rather than asserting a globally strict schedule. Confirm Priority/
 and enable it on the target namespace before treating those measurements as a scheduler
 evaluation.
 
-This scenario does not execute the retrieval workflow tree or production adapters. It validates
-the measurement harness, not production capacity or SLOs. A release load test must add realistic
-stores, users, resources, page sizes, document bodies, quota scopes, provider behavior, and
-production storage, as described in the
+This scenario does not execute the retrieval workflow tree, Northstar App, or Lakebase adapter. It
+validates the measurement harness, not production capacity or SLOs. A release load test must add
+realistic stores, users, resources, page sizes, document bodies, quota scopes, provider behavior,
+database pool/transaction/search load, and production storage, as described in the
 [production-readiness guide](../../docs/architecture-production-readiness.md).

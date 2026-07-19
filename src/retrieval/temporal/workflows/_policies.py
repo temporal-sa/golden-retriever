@@ -58,7 +58,10 @@ def ingestion_activity_options() -> dict[str, Any]:
     return {
         "start_to_close_timeout": timedelta(minutes=15),
         "schedule_to_close_timeout": timedelta(minutes=30),
-        "heartbeat_timeout": timedelta(seconds=30),
+        # Demo holds are capped at 30 seconds. Keep a margin so a cancellation
+        # delivered at the boundary cannot race an Activity heartbeat timeout
+        # and start an unnecessary retry before the bounded hold resolves.
+        "heartbeat_timeout": timedelta(seconds=45),
         "retry_policy": RetryPolicy(
             initial_interval=timedelta(seconds=2),
             backoff_coefficient=2.0,

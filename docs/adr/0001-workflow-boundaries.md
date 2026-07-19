@@ -11,10 +11,11 @@ quotas, failed-user remediation, and store cleanup. A single workflow would accu
 history and mix lifecycle ownership with high-volume fan-out. Using Activities for coordination
 would make waits, cancellation, and ownership dependent on worker processes.
 
-The design also has two correctness constraints:
+The design also has three correctness constraints:
 
 1. provider response bodies must not inflate Workflow Event History; and
-2. deactivation must prevent late, retried Activities from mutating an inactive store.
+2. at-least-once Activity delivery must not create duplicate database effects; and
+3. deactivation must prevent late, retried Activities from mutating an inactive store.
 
 ## Decision
 
@@ -34,12 +35,14 @@ Use one `UserQuotaWorkflow` per provider, opaque credential key, and quota class
 performs Signal-with-Start, then the caller waits durably on a workflow condition. Provider
 Priority/Fairness metadata applies only after quota admission.
 
-Store deactivation always follows `fence → cancel → drain → cleanup`. Every mutating Activity
-compares the expected lifecycle generation and allowed state in the same transaction as its
-write. Cancellation reduces wasted work; the generation fence provides safety.
+Store deactivation always follows `fence → cancel → drain → bounded cleanup`. Every mutating
+Activity compares the expected lifecycle generation and allowed state in the same Lakebase
+transaction as its write. Document metadata, chunks, and an idempotency receipt commit together.
+Cancellation reduces wasted work; the generation fence provides safety.
 
 Workflow inputs and results carry compact `DocumentRef` metadata. Document bodies remain in a
-staging or object store and are loaded by the ingestion Activity.
+staging or object store and are loaded, verified, parsed, and chunked by the ingestion Activity.
+Searchable chunks never become workflow payloads.
 
 ## Rationale
 
@@ -49,7 +52,8 @@ staging or object store and are loaded by the ingestion Activity.
 - Page and root Continue-As-New boundaries keep Event History bounded.
 - Shared quota state survives caller and worker restarts without occupying Activity slots.
 - Staged document bodies bound payload size and replay cost.
-- Atomic generation checks make at-least-once Activity delivery safe across deactivation.
+- Atomic generation checks and durable receipts make at-least-once Activity delivery safe across
+  retries and deactivation.
 
 ## Alternatives considered
 
@@ -87,6 +91,10 @@ likely to contain sensitive content.
 - Quota acquisition adds a short client Activity and Signals, but blocked requests use no Activity
   worker slot.
 - Production adapters must implement atomic generation compare-and-write and idempotent mutations.
+- Lakebase and demo schemas are owned and migrated outside Workflow execution; runtime identities
+  receive explicit object grants. The Databricks App resource additionally confers managed
+  database-level `CONNECT`/`CREATE`, which requires a dedicated database or a verified post-binding
+  revocation where policy demands it.
 - Workflow upgrades require representative history replay and compatible Worker Versioning
   routing.
 

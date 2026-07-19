@@ -1,0 +1,6 @@
+# Effective Databricks Apps process manifest. Environment values and secrets are
+# attached by apps/retrieval_demo/databricks.yml rather than committed here.
+command:
+  - python
+  - -m
+  - apps.retrieval_demo.app

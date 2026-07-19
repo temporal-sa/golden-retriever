@@ -1,0 +1,10 @@
+# Databricks Apps installs this file from the deployed repository root.
+# Keep these versions aligned with uv.lock and apps/retrieval_demo/requirements.txt.
+-e .
+databricks-sdk==0.121.0
+fastapi==0.139.2
+httpx==0.28.1
+psycopg[binary,pool]==3.3.4
+psycopg-pool==3.3.1
+temporalio==1.30.0
+uvicorn[standard]==0.51.0

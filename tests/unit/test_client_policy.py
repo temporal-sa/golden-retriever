@@ -72,4 +72,4 @@ def test_from_runtime_enables_fairness_only_after_both_gates(
 
 
 def test_ingestion_activity_has_heartbeat_timeout() -> None:
-    assert ingestion_activity_options()["heartbeat_timeout"] == timedelta(seconds=30)
+    assert ingestion_activity_options()["heartbeat_timeout"] == timedelta(seconds=45)

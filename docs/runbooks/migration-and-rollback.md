@@ -1,162 +1,320 @@
-# Deployment, upgrade, and rollback runbook
+# Migration, validation, rollout, and rollback runbook
 
-This runbook is for operators packaging `retrieval-worker` for a real Temporal namespace. It
-covers initial deployment and later upgrades. It assumes the production-readiness release gate is
-owned by the deploying organization; this repository does not include infrastructure manifests.
+This runbook covers the built Lakebase schemas, Databricks App bundle, and separate Temporal worker.
+Commands in the validation sections are safe preparation steps; they do not deploy the App.
 
-## Before deployment
+No target deployment was performed while preparing this repository. Always substitute an explicit
+workspace profile, database roles, resource paths, secret scope, and namespace reviewed for the
+target environment.
 
-1. Implement and contract-test production `RetrievalRepository`, `StagingStore`, and
-   `ProviderGateway` adapters.
-2. Build an immutable worker artifact containing the adapters and record its source revision and
-   `TEMPORAL_BUILD_ID`.
-3. Confirm the target namespace supports the required SDK features, retention, and limits.
-4. Register custom Search Attributes if search visibility will be enabled.
-5. Replay representative histories against every worker build that may process them.
-6. Configure SDK runtime telemetry, dashboards, alerts, and log redaction.
-7. Allocate at least two independently scheduled worker replicas per live build.
-8. Agree on canary health thresholds, rollback authority, and incident ownership.
+## Identities and ownership
 
-Do not deploy with the local in-memory adapters, an untested mutable build ID, or a single worker
-replica.
+Use three distinct database identities:
 
-## Configure production adapters
+| Identity | Steady-state purpose |
+|---|---|
+| Migration owner | Owns both `retrieval` and `retrieval_demo_ui`, migrations, tables, indexes, and seed function |
+| App role | Core reads, demo DML, sequence use, fixed Northstar seed function |
+| Worker role | Core retrieval DML plus limited demo controls/events |
 
-The worker loads zero-argument factories from importable Python modules. Configure the complete
-set:
+The App does not own or create `retrieval_demo_ui`. Both migrations run as the migration owner.
+Core table DML is withheld from the App; it creates a run only through the constrained
+`retrieval_demo_ui.create_northstar_run(...)` `SECURITY DEFINER` function. Public access is revoked
+by the demo migration.
 
-```text
-RETRIEVAL_REPOSITORY_FACTORY=package.module:create_repository
-RETRIEVAL_STAGING_STORE_FACTORY=package.module:create_staging_store
-RETRIEVAL_PROVIDER_GATEWAY_FACTORY=package.module:create_provider_gateway
+## Connection environment
+
+All migration/grant CLIs use `LakebaseConfig`. For Lakebase OAuth:
+
+```bash
+export PGHOST=<DATABASE_HOST>
+export PGPORT=5432
+export PGDATABASE=<DATABASE_NAME>
+export PGUSER=<MIGRATION_OWNER_ROLE>
+export PGSSLMODE=require
+export LAKEBASE_ENDPOINT=projects/<PROJECT>/branches/<BRANCH>/endpoints/<ENDPOINT>
 ```
 
-Each factory may be synchronous or asynchronous and must return the corresponding interface
-implementation. It reads database, object-store, provider, and secret settings from the deployment
-environment; the worker passes no arguments.
+The Databricks SDK must be authenticated for that endpoint. For an SSL-enabled local Postgres test
+database, omit `LAKEBASE_ENDPOINT` and set `PGPASSWORD` instead. Never set both endpoint OAuth and a
+static password. Do not paste a password into a command line or commit an environment file.
 
-The factory set is all-or-nothing. Missing or partial production configuration fails startup.
-Leave `RETRIEVAL_ALLOW_UNSAFE_IN_MEMORY_ADAPTERS` unset or `false` in every shared environment.
+## First-time schema and grant order
 
-## Configure the Temporal connection
+### 1. Inspect migration status
 
-At minimum, set values appropriate to the target namespace:
+These commands make no schema changes:
 
-```text
-TEMPORAL_ADDRESS=<frontend-address>
-TEMPORAL_NAMESPACE=<namespace>
-TEMPORAL_API_KEY=<secret-if-required>
-TEMPORAL_TLS=true
-TEMPORAL_RETRIEVAL_TASK_QUEUE=<retrieval-queue>
-TEMPORAL_PROVIDER_TASK_QUEUE=<provider-queue>
-TEMPORAL_DEPLOYMENT_NAME=<stable-deployment-name>
-TEMPORAL_BUILD_ID=<unique-immutable-build-id>
-TEMPORAL_USE_WORKER_VERSIONING=true
+```bash
+uv run retrieval-lakebase-migrate --check --json
+uv run retrieval-demo-migrate --check --json
 ```
 
-Configure provider queue RPS and workflow tuning only from measured provider limits and load-test
-results. If Priority/Fairness is enabled, both
-`TEMPORAL_SERVER_PRIORITY_FAIRNESS_SUPPORTED=true` and
-`TEMPORAL_ENABLE_PRIORITY_FAIRNESS=true` must reflect verified server capability.
+On a new database they return nonzero with pending versions. On an initialized database they also
+verify that every stored name/checksum matches the packaged migration.
 
-Search Attributes are optional. Register the typed schema before setting
-`TEMPORAL_ENABLE_SEARCH_ATTRIBUTES=true`; otherwise workflow starts can fail.
+### 2. Apply core, then demo migrations
 
-## Verify the artifact before traffic
+Run as the migration owner:
 
-Run these checks against the exact artifact or source revision to be deployed:
+```bash
+uv run retrieval-lakebase-migrate
+uv run retrieval-demo-migrate
+```
+
+Both runners are forward-only, checksum-verified, and serialized by advisory transaction locks.
+Never edit an applied migration. Add the next contiguous migration instead.
+
+### 3. Apply runtime grants
+
+The database roles must already exist. Still using the migration owner connection:
+
+```bash
+uv run retrieval-lakebase-grant-roles \
+  --app-role <APP_DB_ROLE> \
+  --worker-role <WORKER_DB_ROLE>
+```
+
+The command validates that roles are nonempty/distinct, composes them as quoted SQL identifiers,
+and applies the explicit grants in one transaction. It is safe to rerun after migrations.
+
+The grant set gives the App:
+
+- schema `USAGE`;
+- `SELECT` on core stores, users, retrieval state, documents, chunks, and the core migration
+  ledger—enough for store aggregates, search, and readiness, but not write receipts;
+- `SELECT` on demo tables, `UPDATE` on runs/controls, and `INSERT`/`UPDATE` on events, operations,
+  and HTTP idempotency receipts;
+- demo sequence use; and
+- `EXECUTE` on the fixed Northstar seed function.
+
+It gives the worker:
+
+- schema `USAGE` and core migration-ledger `SELECT`;
+- core table reads; inserts/updates on stores, users, retrieval state, and documents; inserts on
+  chunks/receipts; and deletes on retrieval state, documents, and chunks; and
+- demo run/control reads, control updates, and event reads/inserts/updates plus sequence use.
+
+The worker role receives neither schema ownership nor general DDL. The explicit object grants do
+not give the App role schema ownership or table-alter privileges. However, a Databricks App
+`postgres` resource with `CAN_CONNECT_AND_CREATE` also grants its service principal database-level
+`CONNECT` and `CREATE`; the grant command does not revoke that platform permission. Consequently,
+the App can create schemas in the bound database even though this application never needs to.
+Review `src/retrieval/lakebase/grants.py` whenever a migration adds a runtime-accessed object;
+PostgreSQL does not automatically extend these explicit grants to future tables.
+
+### 4. Verify with the runtime identities
+
+Open a fresh connection as each role and run the migration checks. Then verify permissions with a
+transaction that is rolled back or a dedicated disposable store. At minimum confirm:
+
+- App: core aggregate/search reads, demo reads/writes, seed function execution, and core DML denial;
+- worker: repository mutations and cleanup, scripted quota controls, and event appends;
+- worker: no schema creation or object-alter privilege;
+- App: no core/demo object-alter privilege, and explicitly record whether database `CREATE` remains
+  effective through the Databricks resource binding.
+
+Treat the bound Lakebase database as a dedicated isolation boundary. If organizational policy
+forbids runtime schema creation, have the migration owner run `REVOKE CREATE ON DATABASE
+<database> FROM <app_role>` only after the App resource is bound, then reconnect as the App and
+prove both that schema creation is denied and normal readiness/search operations still work.
+Recheck after every resource-binding update because the platform may restore its managed grant.
+Do not assume the repository's table-grant command performs this database-level revocation.
+
+The App's `/readyz` checks Lakebase, both migration ledgers, and Temporal, but it is not a substitute
+for negative privilege tests.
+
+## Local full-stack rehearsal
+
+Start a local Temporal server:
+
+```bash
+temporal server start-dev
+```
+
+With the schemas/grants applied, use the worker role in one terminal:
+
+```bash
+export TEMPORAL_ADDRESS=localhost:7233
+export TEMPORAL_NAMESPACE=default
+export TEMPORAL_TLS=false
+export RETRIEVAL_DEMO_MODE=true
+export RETRIEVAL_SEARCH_BACKEND=postgres_text
+export RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle
+uv run retrieval-worker
+```
+
+Use the App role and the same Temporal namespace in a second terminal:
+
+```bash
+export RETRIEVAL_DEMO_MODE=true
+export RETRIEVAL_SEARCH_BACKEND=postgres_text
+uv run retrieval-demo-app
+```
+
+Check the process and dependencies separately:
+
+```bash
+curl --fail http://127.0.0.1:8000/healthz
+curl --fail http://127.0.0.1:8000/readyz
+```
+
+Create a fresh run for every rehearsal. Do not reset an existing generation.
+
+## Build the separate worker artifact
+
+Build, but do not publish or deploy, the worker image:
+
+```bash
+docker build -f Dockerfile.worker -t temporal-retrieval-worker:local .
+```
+
+Run it locally with a reviewed `worker.env` that contains worker-role Lakebase credentials, Temporal
+settings, `RETRIEVAL_DEMO_MODE=true`, and the bundle factory:
+
+```bash
+docker run --rm --env-file worker.env temporal-retrieval-worker:local
+```
+
+The worker gives each Temporal poller 45 seconds to drain after `SIGTERM`, exceeding the demo's
+maximum 30-second held-commit wait. Configure the container or orchestrator termination grace
+period to at least 60 seconds so poller drain and adapter close
+can finish before a hard kill. As a rollout gate, send `SIGTERM` during an active rehearsal,
+confirm both Task Queue pollers stop accepting work, and verify the process exits cleanly within
+that window.
+
+When the Temporal development server runs on the Docker host, use the host address appropriate to
+the platform (for example `host.docker.internal:7233` on Docker Desktop), not container-local
+`localhost`.
+
+The worker must run on long-lived compute independently of Databricks Apps. For a production
+namespace, use immutable image/build identity, Worker Versioning, graceful shutdown, and at least
+two replicas for each live build.
+
+## Validate the Databricks App bundle without deploying
+
+The bundle root is `apps/retrieval_demo`. It references the repository root as source so the
+`retrieval` and `apps` Python packages, root `app.yaml`, and root `requirements.txt` are included.
+
+Choose the authenticated profile explicitly; never rely on whichever Databricks profile happens to
+be default:
+
+```bash
+cd apps/retrieval_demo
+databricks bundle validate --profile <PROFILE> -t dev \
+  --var lakebase_branch=projects/<PROJECT>/branches/<BRANCH> \
+  --var lakebase_database=projects/<PROJECT>/branches/<BRANCH>/databases/<DATABASE> \
+  --var temporal_secret_scope=<SECRET_SCOPE>
+```
+
+Optional variables override the default secret keys `temporal-address`, `temporal-namespace`, and
+`temporal-api-key`. The target secret scope must contain those values and the App service principal
+must be able to read the referenced secret resources.
+
+The bundle's `postgres` resource uses `CAN_CONNECT_AND_CREATE` and injects the standard `PG*`
+variables plus `LAKEBASE_ENDPOINT`. The App command is
+`python -m apps.retrieval_demo.app`; it binds `0.0.0.0:$DATABRICKS_APP_PORT`.
+
+That managed permission includes database-level `CONNECT` and `CREATE`. Select a dedicated demo
+database, apply the effective-privilege check above, and document any post-binding `REVOKE CREATE`
+required by local policy.
+
+`databricks bundle validate` checks the bundle and target context. It does not deploy the App.
+There is intentionally no deployment command in this repository's local verification sequence.
+
+## Pre-rollout artifact verification
+
+Run against the exact source revision/image intended for a target:
 
 ```bash
 uv run ruff check .
 uv run ruff format --check .
-uv run python -m compileall -q src tests
+uv run python -m compileall -q src tests apps
 uv run pytest
-RUN_TEMPORAL_INTEGRATION=1 uv run pytest -m integration tests/integration
+make integration
+RUN_TEMPORAL_INTEGRATION=1 uv run pytest -q tests/demo/test_temporal_late_writer.py
 uv run pytest -m replay tests/replay
+uv build
+docker build -f Dockerfile.worker -t temporal-retrieval-worker:local .
 ```
 
-For a production-like namespace, set the suite-specific address, namespace, and credential
-variables described in the test README files. Archive test output, replay inputs, build identity,
-and load/SLO results as release evidence.
+Archive test output, migration status, grant review, history inventory, dependency lock, image
+digest, bundle validation output, and build identity. A production release also needs realistic
+load/SLO evidence and the gates in
+[`../architecture-production-readiness.md`](../architecture-production-readiness.md).
 
-## High-availability worker layout
+## Future rollout order
 
-One `retrieval-worker` process starts both a retrieval-queue worker and a provider-queue worker.
-Run at least two independent process replicas for each live build. Confirm both Task Queues have
-pollers before marking a replica ready.
+After the target-specific review authorizes deployment, use this dependency order:
 
-During an upgrade, this minimum applies to every build that still owns pinned executions. Use
-graceful shutdown so pollers stop accepting work before the process exits. If the queues are later
-split into separate services, keep at least two replicas per Task Queue and live build.
+1. select/provision the dedicated Lakebase branch/database and database roles;
+2. ensure the Databricks App service principal/resource identity is known;
+3. apply core migration, demo migration, then runtime grants as the migration owner;
+4. start worker replicas without admitting commands and verify both queue pollers;
+5. start the App and verify liveness/readiness with the App identity;
+6. run a fresh non-customer Northstar rehearsal;
+7. admit a small deterministic canary only after the rehearsal passes;
+8. expand only while named health and rollback thresholds remain satisfied.
 
-## Initial rollout
+Do not start root sync or deactivation workflows directly to bypass controller serialization.
 
-1. Deploy the worker replicas without sending application commands.
-2. Verify adapter connectivity, both Task Queue pollers, telemetry export, build identity, and
-   Worker Versioning routing.
-3. Run a non-customer smoke store through sync, cancellation, and deactivation. Confirm the
-   lifecycle generation and final repository state.
-4. Admit a small deterministic canary cohort through `RetrievalClient`.
-5. Watch schedule-to-start latency, worker slots and pollers, provider outcomes, quota pending and
-   reset behavior, stale-generation rejections, remediation, deactivation drain, and history size.
-6. Expand only while the documented health thresholds remain satisfied.
+## Upgrade procedure
 
-Do not start application workflows directly to bypass controller serialization.
+1. Inventory open executions by Workflow Type, Task Queue, and assigned worker build.
+2. Export and replay representative histories, including patched cleanup and Continue-As-New paths.
+3. Back up or branch the database according to the target recovery policy.
+4. Apply only new forward migrations as the migration owner, then rerun runtime grants.
+5. Build a new immutable worker image/build ID; do not mutate a running build identity.
+6. Start at least two new replicas and verify both Task Queues before routing work.
+7. Validate/start the compatible App artifact and run a fresh rehearsal store.
+8. Route a deterministic canary using the namespace's reviewed Worker Versioning procedure.
+9. Keep the previous compatible build healthy until all executions assigned to it close or move
+   through an explicitly compatible Continue-As-New path.
 
-## Upgrade an existing deployment
+## Rollback
 
-1. Inventory open executions by Workflow Type, Task Queue, and assigned build.
-2. Export representative histories from every affected cohort and replay them against the new
-   artifact.
-3. Register the new immutable build in the existing deployment and start at least two replicas.
-4. Confirm the new build polls both queues and passes a non-customer smoke execution.
-5. Route a deterministic canary cohort to the new build using the target namespace's supported
-   Worker Versioning procedure.
-6. Observe the canary for at least the agreed maximum workflow and quota-reset windows.
-7. Promote gradually. Keep the prior compatible build healthy until all executions assigned to it
-   have completed or Continue-As-New onto an explicitly compatible path.
+### Application and admission rollback
 
-If histories require Workflow Types not used by new executions, set
-`TEMPORAL_REGISTER_LEGACY_DRAIN_TYPES=true` only on builds that contain compatible implementations.
-The placeholders in this repository are not sufficient for arbitrary external histories.
+Rollback changes new-work admission and routing; it does not rewrite workflow history or database
+generations.
 
-## Roll back admission
+1. Stop new App commands or new-work routing to the affected build.
+2. Keep every build that owns open pinned executions running.
+3. Restore new work to the last verified compatible App/worker artifact.
+4. Confirm controller commands, both queues, quota recovery, database readiness, and lifecycle
+   outcomes recover.
+5. Preserve failed-build histories, migration status, and telemetry for diagnosis.
 
-Rollback changes routing for new work; it does not rewrite Workflow Event History.
+### Schema rollback
 
-1. Stop assigning new executions to the affected build or disable the application entry path.
-2. Keep at least two healthy replicas of every build that owns open pinned executions.
-3. Restore new-work routing to the last verified compatible build.
-4. Confirm controller commands, provider queues, quota recovery, and lifecycle metrics recover.
-5. Preserve the failed build's histories and telemetry for replay and diagnosis.
+Migrations are forward-only. Do not edit migration ledgers or run ad-hoc down migrations. If a new
+schema version is faulty:
 
-Never move an open execution to code that cannot replay its history.
+- prefer a forward corrective migration when the data remains valid;
+- if restoration is required, stop admission, preserve Temporal-compatible workers, restore the
+  database/branch using the target's approved recovery procedure, and reconcile every store's
+  lifecycle generation before resuming;
+- replay histories and rerun contract/readiness checks against the restored state.
 
-## Recover an incomplete deactivation
+### Incomplete deactivation
 
-Determine whether the generation fence committed:
+Determine whether the fence committed:
 
-- **Before the fence:** the controller can return to `ACTIVE` or `SYNCING`; retry the command after
-  resolving the failure.
-- **After the fence:** the store is fenced even if cleanup failed. Keep the generation unchanged,
-  record `DEACTIVATION_FAILED`, correct the dependency, and resume with the same generation and
-  stable deactivation Workflow ID.
+- **before the fence:** the store remains `active`/`syncing`; correct the dependency and retry the
+  command;
+- **after the fence:** keep the new generation, repair the dependency, and resume cleanup with the
+  same generation and stable deactivation identity.
 
-Do not reactivate the store by decrementing its generation. Do not treat Activity cancellation as
-the safety mechanism; repository compare-and-write is authoritative.
+Never decrement a generation. Never treat cancellation as the data-safety mechanism.
 
-## Recover provider quota coordination
+### Provider quota recovery
 
-When a provider call outcome is ambiguous, do not refund its permit. Allow the next authoritative
-quota observation or reset time to restore capacity. Investigate a scope that remains blocked
-beyond its reset window using the quota workflow state, provider response metadata, and bounded
-metrics—never by logging raw credentials or quota keys.
+Do not refund a permit after an ambiguous provider outcome. Let the next authoritative quota
+observation or reset restore capacity. Diagnose a stuck scope from bounded workflow state and
+metrics without logging the credential key.
 
-## Remove a worker build
+## Remove an old worker build
 
-Remove a build or compatibility registration only after all of the following are true:
-
-- Temporal visibility shows zero open executions assigned to it;
-- namespace retention plus the organization's replay window has elapsed where required;
-- representative retained histories replay on the builds expected to handle them;
-- rollback owners agree that the build is no longer part of the recovery plan.
+Remove a build only after Temporal visibility shows zero open executions assigned to it,
+representative retained histories replay on their intended builds, the required retention/replay
+window has elapsed, and rollback owners agree it is no longer part of recovery.

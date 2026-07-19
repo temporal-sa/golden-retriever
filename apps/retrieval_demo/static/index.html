@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Northstar retrieval control room</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E" />
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div>
+        <p class="eyebrow">LAKEBASE × TEMPORAL</p>
+        <h1>Retrieval control room</h1>
+        <p class="lede">
+          Watch workflow coordination meet a generation-fenced database commit boundary.
+        </p>
+      </div>
+      <div class="run-tools">
+        <p id="run-label" class="run-label">No demo run selected</p>
+        <button id="new-run" class="button button-primary" type="button">New Northstar run</button>
+      </div>
+    </header>
+
+    <div id="error-banner" class="error-banner" role="alert" hidden></div>
+    <div id="connection-banner" class="connection-banner" aria-live="polite">
+      Create a fresh run to begin.
+    </div>
+
+    <main class="dashboard" aria-label="Northstar retrieval demonstration">
+      <section class="panel account-panel" aria-labelledby="account-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-number">01</p>
+            <h2 id="account-heading">Account workspace</h2>
+          </div>
+          <span id="lifecycle-badge" class="badge badge-neutral">not started</span>
+        </div>
+
+        <div class="identity">
+          <div>
+            <p class="label">Account</p>
+            <p id="display-name" class="account-name">Northstar AI</p>
+          </div>
+          <div class="generation-block">
+            <p class="label">Database generation</p>
+            <p id="database-generation" class="generation">—</p>
+          </div>
+        </div>
+
+        <dl class="stats" aria-label="Authoritative Lakebase counts">
+          <div><dt>Users</dt><dd id="user-count">—</dd></div>
+          <div><dt>Documents</dt><dd id="document-count">—</dd></div>
+          <div><dt>Chunks</dt><dd id="chunk-count">—</dd></div>
+        </dl>
+
+        <div class="controller-state">
+          <span>Controller</span>
+          <strong id="controller-state">unknown</strong>
+          <span id="controller-generation">generation —</span>
+        </div>
+
+        <div class="button-row">
+          <button id="sync" class="button button-primary" type="button" disabled>Sync account</button>
+          <button id="ask" class="button" type="button" disabled>Ask account</button>
+          <button id="deactivate" class="button button-danger" type="button" disabled>
+            Deactivate workspace
+          </button>
+        </div>
+      </section>
+
+      <section class="panel topology-panel" aria-labelledby="topology-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-number">02</p>
+            <h2 id="topology-heading">Workflow topology</h2>
+          </div>
+          <span id="temporal-status" class="badge badge-neutral">Temporal unknown</span>
+        </div>
+        <p class="panel-copy">
+          Workflow IDs are coordination evidence. Lakebase remains the source of mutation truth.
+        </p>
+        <div id="workflow-groups" class="workflow-groups">
+          <p class="empty-state">Workflow activity will appear after sync begins.</p>
+        </div>
+        <div id="operations" class="operations" aria-live="polite"></div>
+      </section>
+
+      <section class="panel answer-panel" aria-labelledby="answer-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-number">03</p>
+            <h2 id="answer-heading">Retrieved answer</h2>
+          </div>
+          <span id="backend-badge" class="badge badge-search">postgres_text</span>
+        </div>
+        <label for="question" class="label">Question</label>
+        <textarea id="question" rows="3">What should the account team prioritize before Northstar's renewal?</textarea>
+        <div id="answer-result" class="answer-result">
+          <p class="empty-state">Ask after the first documents are committed.</p>
+        </div>
+        <ol id="citations" class="citations" aria-label="Ranked retrieval evidence"></ol>
+      </section>
+
+      <section class="panel failure-panel" aria-labelledby="failure-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-number">04</p>
+            <h2 id="failure-heading">Failure lab</h2>
+          </div>
+          <span id="quota-badge" class="badge badge-warning">quota pending</span>
+        </div>
+
+        <div class="hold-card">
+          <div>
+            <p class="label">Late security review</p>
+            <p id="hold-state" class="hold-state">Waiting for a run</p>
+          </div>
+          <div class="button-row compact">
+            <button id="hold" class="button" type="button" disabled>Arm hold</button>
+            <button id="release" class="button button-warning" type="button" disabled>
+              Release late write
+            </button>
+          </div>
+          <p id="release-hint" class="hint">
+            Release unlocks only after Lakebase commits the generation 8 fence.
+          </p>
+        </div>
+
+        <div class="timeline-heading">
+          <h3>Database event timeline</h3>
+          <span id="event-count">0 events</span>
+        </div>
+        <ol id="event-timeline" class="event-timeline" aria-live="polite">
+          <li class="empty-state">Presentation events will appear here.</li>
+        </ol>
+      </section>
+    </main>
+
+    <footer>
+      <span>Demo mode only · fresh stores are created, never rewound</span>
+      <span id="last-updated">Not yet connected</span>
+    </footer>
+  </body>
+</html>

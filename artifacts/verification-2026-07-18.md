@@ -1,42 +1,73 @@
 # Local verification snapshot — 2026-07-18
 
-This file records one local development run so contributors can understand the repository's
-tested baseline. It is not production-scale evidence and does not satisfy the adapter, target
-namespace, representative-history, telemetry, security, or deployment requirements in the
-[production-readiness guide](../docs/architecture-production-readiness.md).
+This records evidence for the current source tree and locally built artifacts. It is not a target
+capacity, target compatibility, or deployment claim. Environment-specific gates remain in the
+[`production-readiness guide`](../docs/architecture-production-readiness.md).
 
-## Environment
+## Environment recorded for this work
 
 - Virtual-environment Python: 3.13.5
 - Temporal Python SDK: 1.30.0
-- System Temporal CLI: 1.7.2
-- SDK-downloaded Temporal CLI / ephemeral server: 1.8.0 / 1.31.2
 - pytest: 8.4.2
 - Ruff: 0.15.22
+- Databricks CLI used for offline bundle-schema validation: 0.299.2
 
-## Results
+Dependencies are locked in `uv.lock`, root `requirements.txt`, and
+`apps/retrieval_demo/requirements.txt`.
 
-| Verification | Result |
+## Verified local results
+
+| Command or check | Result |
 |---|---:|
-| Ruff lint | clean |
-| Ruff format check | clean |
-| Python compileall | clean |
-| Default test suite | 147 passed, 6 skipped |
-| Temporal integration suite, including full topology | 5 passed |
-| Checked-in local `RootSyncWorkflow` history replay | 1 passed |
-| Opt-in Temporal load harness | 1 passed |
+| `uv lock --check` | 52-package lock coherent |
+| `uv run ruff check .` | passed |
+| `uv run ruff format --check .` | 111 files formatted |
+| `uv run python -m compileall -q src tests apps` | passed |
+| `uv run pytest -q` | 270 passed, 7 skipped |
+| `RUN_TEMPORAL_INTEGRATION=1 uv run pytest -q -m integration tests/integration tests/demo` | 6 passed, 30 deselected |
+| `uv run pytest -q -m replay tests/replay` | 2 passed |
+| `uv run retrieval-demo-headless --json` | inactive, generation 8, zero documents/chunks, four citations, stale write rejected |
+| `node --check apps/retrieval_demo/static/app.js` | passed |
+| Databricks CLI offline bundle-schema validation | zero schema errors |
+| `uv build` | wheel and source distribution built successfully |
 
-The default skips were the five opt-in Temporal integration tests and one opt-in load test. Those
-suites were enabled and run separately for this snapshot. The default suite replays
-`artifacts/histories/root-sync-replay-smoke.json`.
+The default suite covers unit, repository contract, Lakebase SQL/pool/migration/search, Northstar
+fixture/service/headless, FastAPI, packaging-security, shutdown, and checked-in history replay
+behavior. Its skips are the opt-in Temporal integration and load scenarios.
 
-The full-topology scenario uses a scripted provider response and a staged document. It traverses
-root, user, resource, page, file, and document workflows and verifies the generation-fenced
-repository commit.
+The full Northstar integration starts an SDK-managed time-skipping Temporal server and the real
+controller/root/provider/document/deactivation/cleanup topology. It observes the five-second
+quota wait, commits four cited documents, holds the fifth before commit, commits the generation-8
+fence, reaches `inactive` with zero rows, then releases the held generation-7 write and observes
+the stale-generation rejection. The integration suite also covers cancellation, controller
+terminal queries, and Task Queue topology. It uses in-memory persistence and does not claim live
+Lakebase validation.
 
-The load scenario used 30 Signal operations and a synthetic two-scope fairness workload with 20
-large-scope and 10 small-scope operations. It validates the harness and local execution path; it
-does not establish production capacity, fairness guarantees, or SLOs.
+Checked-in replay inputs are:
 
-Run the commands in the root [README](../README.md#test-and-validate) to reproduce the current
-suite. Results may differ when dependency, SDK, CLI, or server versions change.
+- `artifacts/histories/root-sync-replay-smoke.json`;
+- `artifacts/histories/remove-objects-pre-batch.json`.
+
+The headless and browser rehearsals exercised the four-panel App, a fresh UUID run, workflow IDs,
+generation changes, the cited answer, and the terminal late-writer sequence. No browser console
+error remained after the favicon and release-state fixes.
+
+## Deliberately not performed
+
+- No Lakebase project, branch, database, role, migration, grant, or data was created or changed.
+- No Databricks App bundle was deployed or started in a workspace.
+- No authenticated target `databricks bundle validate` ran because no explicit valid profile and
+  target resource values were available.
+- Docker Engine 29.6.1 was reachable, but the worker image build could not resolve base-image
+  metadata from GHCR/Docker Hub before the registry deadline. Dependency installation and
+  Dockerfile structure were validated separately with Python 3.12; no partial image was tagged.
+- No worker image was published and no worker process was deployed.
+- No cloud Temporal namespace was accessed or changed.
+
+Before a real deployment, validate with an explicitly selected authenticated Databricks profile,
+run the migrations and effective-privilege tests against a dedicated Lakebase database, verify the
+managed App database `CREATE` privilege, build the worker image with approved immutable base-image
+digests, and test target Temporal/Lakebase connectivity. Use the root
+[README](../README.md#test-and-validate) and
+[migration runbook](../docs/runbooks/migration-and-rollback.md#pre-rollout-artifact-verification)
+for the exact commands.

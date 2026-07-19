@@ -1,279 +1,304 @@
-# Workflow topology
+# Workflow and data topology
 
-This page is the visual guide to the runtime described in
-[`IMPLEMENTATION_MAP.md`](../IMPLEMENTATION_MAP.md). It shows workflow ownership, bounded fan-out,
-provider quota coordination, recovery, and store deactivation.
+This is the visual map of the running system. Temporal owns durable coordination; Lakebase owns
+current database truth; the FastAPI App is a control and presentation surface. A **joined** child
+must finish before its parent finishes. A **detached** workflow is started with a stable ID,
+acknowledged by Temporal, and tracked by the store controller.
 
-In the diagrams, a **joined** child must finish before its parent can finish. A **detached**
-workflow is started with a stable Workflow ID, acknowledged by Temporal, and then tracked by the
-store controller. Dashed arrows represent Signals, cancellation requests, or shared coordination
-rather than parent-child ownership.
-
-## Store lifecycle and command flow
-
-Applications do not start sync or deactivation workflows directly. They call `RetrievalClient`,
-which uses Update-with-Start to create or update the single controller for a store.
-
-```mermaid
-stateDiagram-v2
-    [*] --> ACTIVE: controller starts
-    ACTIVE --> SYNCING: request_sync accepted
-    SYNCING --> ACTIVE: sync and remediation complete
-    SYNCING --> SYNCING: cancel_sync requested
-    ACTIVE --> DEACTIVATING: start_deactivation accepted
-    SYNCING --> DEACTIVATING: start_deactivation accepted
-    DEACTIVATING --> INACTIVE: cleanup succeeds
-    DEACTIVATING --> DEACTIVATION_FAILED: cleanup cannot finish
-    DEACTIVATION_FAILED --> DEACTIVATING: retry same generation
-    INACTIVE --> INACTIVE: sync rejected
-```
-
-The controller accepts only one store operation at a time. A store remains `SYNCING` while any
-detached failed-user remediation is still active, even if its root sync has already finished.
-
-## End-to-end workflow tree
-
-```mermaid
-flowchart TB
-    app["Application or API"]
-    client["RetrievalClient"]
-
-    subgraph control["Command serialization and lifecycle ownership"]
-        controller[["StoreControllerWorkflow<br/>one per store; idle-only Continue-As-New"]]
-    end
-
-    subgraph sync["Sync and remediation"]
-        root[["RootSyncWorkflow<br/>user pages or bounded rounds"]]
-        user[["UserSyncWorkflow<br/>bounded resource fan-out"]]
-        resource[["ResourceSyncWorkflow<br/>one resource cursor"]]
-        pages[["ResourcePagesWorkflow<br/>sliding page window and checkpoint"]]
-        files[["FilesPageWorkflow<br/>bounded document fan-out"]]
-        document[["DocumentIngestionWorkflow<br/>generation-fenced mutation"]]
-        remediation[["FailedUserRemediationWorkflow<br/>detached and controller-tracked"]]
-        activate[["ActivateUserWorkflow<br/>recent sync, fence check, backfill"]]
-        comments[["CommentsResyncWorkflow<br/>optional direct boundary"]]
-
-        root -->|"joined, bounded users"| user
-        user -->|"joined, bounded resources"| resource
-        resource -->|"joined"| pages
-        pages -->|"joined, sliding window"| files
-        files -->|"joined, bounded documents"| document
-        root -->|"failed user batches; detached"| remediation
-        remediation -->|"joined, bounded batches"| activate
-        activate -->|"recent then backfill"| user
-        comments -->|"joined"| resource
-    end
-
-    subgraph quota["Shared provider quota"]
-        userQuota[["UserQuotaWorkflow<br/>one per provider, credential, and quota class"]]
-    end
-
-    subgraph deactivate["Generation-fenced deactivation"]
-        deactivateStore[["DeactivateStoreWorkflow<br/>fence, cancel, drain, cleanup"]]
-        cleanupUsers[["CleanupUsersWorkflow<br/>bounded user batches"]]
-        deactivateUser[["DeactivateUserWorkflow"]]
-        deactivateOne[["DeactivateOneUserWorkflow"]]
-        deactivateAll[["DeactivateAllUsersWorkflow"]]
-        removeObjects[["RemoveObjectsWorkflow"]]
-
-        deactivateStore -->|"joined"| cleanupUsers
-        cleanupUsers -->|"explicit user keys"| deactivateUser
-        deactivateUser -->|"joined"| deactivateOne
-        cleanupUsers -->|"empty user set means all users"| deactivateAll
-        deactivateStore -->|"after user cleanup"| removeObjects
-    end
-
-    app --> client
-    client ==>|"Update-with-Start commands"| controller
-    client -.->|"get_status query"| controller
-    controller -->|"request_sync; detached"| root
-    controller -->|"start_deactivation; detached"| deactivateStore
-    controller -.->|"cancel_sync"| root
-
-    root -.->|"operation_status"| controller
-    remediation -.->|"started and finished"| controller
-    deactivateStore -.->|"fenced and terminal status"| controller
-
-    root -.->|"user-list permits"| userQuota
-    pages -.->|"page-fetch permits"| userQuota
-    userQuota -.->|"grant or denial"| root
-    userQuota -.->|"grant or denial"| pages
-
-    deactivateStore -.->|"cancel owned work"| root
-    deactivateStore -.->|"cancel owned work"| remediation
-    deactivateStore -.->|"cancel_generation"| userQuota
-    controller -.->|"operation_drained"| deactivateStore
-```
-
-`CommentsResyncWorkflow` is registered for callers that use the direct comments boundary; the
-controller-driven sync tree does not start it. `QuotaWaitWorkflow` and `AccessioningWorkflow` can
-be registered only for draining compatible existing histories and are never started by the
-current execution path. See the deployment runbook before enabling those registrations.
-
-## Activity and Task Queue boundaries
-
-The `retrieval-worker` process starts two Temporal workers. The queue split isolates provider API
-traffic from repository and staging work, and lets operators apply a provider Activity rate limit
-without throttling lifecycle operations.
+## Runtime components and ownership
 
 ```mermaid
 flowchart LR
-    subgraph retrievalQueue["retrieval-v2 Task Queue"]
+    browser["Browser<br/>four-panel Northstar UI"]
+
+    subgraph appProcess["Databricks App process"]
+        app["FastAPI + static assets<br/>health, commands, snapshots, search"]
+    end
+
+    subgraph temporal["Temporal namespace"]
+        controller[["StoreControllerWorkflow"]]
+        sync[["Sync workflow tree"]]
+        quota[["UserQuotaWorkflow"]]
+        deactivate[["Deactivation workflow tree"]]
+    end
+
+    subgraph workerProcess["Separate long-lived worker process"]
+        retrievalQueue["retrieval-v2 poller<br/>workflows + lifecycle/ingestion/cleanup"]
+        providerQueue["retrieval-provider-v2 poller<br/>provider Activities"]
+        bundle["AdapterBundle<br/>one Lakebase pool + fixtures + demo hooks"]
+    end
+
+    subgraph database["Lakebase Postgres"]
+        core[("retrieval<br/>lifecycle, users, documents, chunks, receipts")]
+        demo[("retrieval_demo_ui<br/>runs, controls, events, operations, HTTP receipts")]
+        fts["Postgres FTS<br/>generated tsvector + GIN"]
+    end
+
+    fixtures["Packaged, manifest-checked<br/>Northstar fixture bodies"]
+    web["Temporal Web<br/>optional deep links"]
+
+    browser <--> app
+    app -->|"Update-with-Start and queries"| controller
+    app -->|"authoritative snapshots, controls, events"| demo
+    app -->|"current state and search"| core
+    app -.-> web
+
+    controller -->|"detached stable starts"| sync
+    controller -->|"detached stable start"| deactivate
+    sync <-.->|"permits and quota observations"| quota
+
+    retrievalQueue <--> controller
+    retrievalQueue <--> sync
+    retrievalQueue <--> quota
+    retrievalQueue <--> deactivate
+    providerQueue -->|"scripted provider calls"| bundle
+    retrievalQueue -->|"fenced Activity mutations"| bundle
+    bundle --> core
+    bundle --> demo
+    bundle --> fixtures
+    core --> fts
+```
+
+The App does not run workflows or Activities. The worker does not serve HTTP. Both use the same
+database schemas with different steady-state grants. The migration identity owns both schemas and
+the fixed Northstar seed function.
+
+## Store command and workflow hierarchy
+
+Applications never start sync or deactivation children directly. `RetrievalClient` uses
+Update-with-Start to reach the single controller for the store.
+
+```mermaid
+flowchart TB
+    caller["App or application code"] --> client["RetrievalClient"]
+    client ==>|"request_sync / cancel_sync / start_deactivation"| controller[["StoreControllerWorkflow<br/>one per store"]]
+    client -.->|"get_status"| controller
+
+    subgraph syncTree["Detached sync; bounded joined descendants"]
+        root[["RootSyncWorkflow<br/>user pages or bounded rounds"]]
+        user[["UserSyncWorkflow<br/>bounded resources"]]
+        resource[["ResourceSyncWorkflow<br/>one cursor"]]
+        pages[["ResourcePagesWorkflow<br/>sliding page window"]]
+        files[["FilesPageWorkflow<br/>bounded documents"]]
+        ingest[["DocumentIngestionWorkflow<br/>staged body + fenced commit"]]
+        remediation[["FailedUserRemediationWorkflow<br/>detached, controller-tracked"]]
+        activate[["ActivateUserWorkflow<br/>recent, recheck, backfill"]]
+
+        root -->|"joined users"| user
+        user -->|"joined resources"| resource
+        resource --> pages
+        pages -->|"joined pages"| files
+        files -->|"joined documents"| ingest
+        root -->|"failed users; detached"| remediation
+        remediation -->|"joined batches"| activate
+        activate --> user
+    end
+
+    subgraph deactivationTree["Detached deactivation; ordered joined cleanup"]
+        deactivation[["DeactivateStoreWorkflow"]]
+        cleanUsers[["CleanupUsersWorkflow"]]
+        userRoute[["DeactivateUserWorkflow"]]
+        oneUser[["DeactivateOneUserWorkflow"]]
+        allUsers[["DeactivateAllUsersWorkflow"]]
+        objects[["RemoveObjectsWorkflow<br/>bounded batches"]]
+
+        deactivation --> cleanUsers
+        cleanUsers -->|"explicit users"| userRoute --> oneUser
+        cleanUsers -->|"empty set means all"| allUsers
+        deactivation -->|"after users"| objects
+    end
+
+    controller -->|"detached, stable sync ID"| root
+    controller -->|"detached, generation ID"| deactivation
+    controller -.->|"cancel owned work"| root
+    root -.->|"operation status"| controller
+    remediation -.->|"registration and finish"| controller
+    deactivation -.->|"fenced and terminal status"| controller
+```
+
+`CommentsResyncWorkflow` is a registered direct resource boundary but is not started by the
+controller-driven tree. Optional drain-only names are documented in
+[`IMPLEMENTATION_MAP.md`](../IMPLEMENTATION_MAP.md#workflow-inventory).
+
+## Task Queue and Activity boundaries
+
+```mermaid
+flowchart LR
+    subgraph retrieval["retrieval-v2 Task Queue"]
         workflows["All registered Workflow Types"]
         lifecycle["Lifecycle Activities<br/>validate, activate, fence, finish"]
-        cleanup["Cleanup Activities<br/>deactivate users, remove objects"]
-        ingestion["Ingestion Activity<br/>load staged body and mutate"]
+        ingestion["Ingestion Activity<br/>load, parse, chunk, receipt, commit"]
+        cleanup["Cleanup Activities<br/>users + one object batch"]
         quotaBridge["Quota bridge Activity<br/>Signal-with-Start"]
     end
 
-    subgraph providerQueue["retrieval-provider-v2 Task Queue"]
+    subgraph provider["retrieval-provider-v2 Task Queue"]
         listUsers["provider_list_active_users"]
         fetchPage["provider_fetch_resource_page"]
     end
 
-    repository[("RetrievalRepository<br/>lifecycle and indexed state")]
-    staging[("StagingStore<br/>document bodies")]
-    provider{{"Provider API"}}
+    repo[("RetrievalRepository")]
+    staging[("StagingStore")]
+    gateway{{"ProviderGateway"}}
+    controls[("Demo controls/events")]
 
-    workflows --> lifecycle
-    workflows --> cleanup
-    workflows --> ingestion
-    workflows --> quotaBridge
-    workflows --> listUsers
-    workflows --> fetchPage
-    lifecycle --> repository
-    cleanup --> repository
-    ingestion --> repository
+    workflows --> lifecycle --> repo
+    workflows --> ingestion --> repo
     ingestion --> staging
-    listUsers --> provider
-    fetchPage --> provider
+    ingestion -.-> controls
+    workflows --> cleanup --> repo
+    workflows --> quotaBridge
+    workflows --> listUsers --> gateway
+    workflows --> fetchPage --> gateway
+    gateway -.-> controls
 ```
 
-The queue names shown are defaults. `TEMPORAL_RETRIEVAL_TASK_QUEUE` and
-`TEMPORAL_PROVIDER_TASK_QUEUE` override them.
+The queue split lets operators rate-limit provider Activities without throttling lifecycle or
+database work. Queue names are configurable. Document bodies are loaded only inside the ingestion
+Activity; workflow messages retain compact `DocumentRef` values.
 
-## Shared quota permit loop
+## Shared provider quota loop
 
-`RootSyncWorkflow` and `ResourcePagesWorkflow` acquire a permit before scheduling a provider
-Activity when their input includes a quota scope. Waiting is durable and does not occupy an
-Activity worker slot.
+One `UserQuotaWorkflow` is keyed by provider, opaque credential key, and quota class. Waiting is
+durable and consumes no Activity slot.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant W as Calling Workflow
+    participant W as Root/ResourcePages Workflow
     participant B as Quota bridge Activity
     participant Q as UserQuotaWorkflow
     participant P as Provider Activity
 
-    W->>B: request permit with deterministic request_id
+    W->>B: deterministic permit request
     B->>Q: Signal-with-Start request_permit
-    Note over Q: One coordinator per provider,<br/>credential key, and quota class
-    alt Invalid, disabled, or pending queue full
-        Q-->>W: quota_denied(reason)
-        Note over W: Caller fails promptly
-    else Request admitted
-        alt Caller is canceled before grant
-            W-->>Q: cancel_permit
-        else Capacity and quota are available
-            Q-->>W: quota_granted
-            W->>P: schedule provider call
-            P-->>W: structured response
-            opt response contains a quota observation
-                W-->>Q: observe_quota
-            end
+    alt invalid or pending queue full
+        Q-->>W: explicit denial
+    else admitted and capacity available
+        Q-->>W: quota_granted
+        W->>P: schedule provider call
+        alt successful response
+            P-->>W: page metadata / DocumentRefs
             W-->>Q: permit_completed
+        else structured quota exhaustion
+            P-->>W: limit, remaining, retry_after
+            W-->>Q: observe authoritative reset
+            Note over Q: block scope until reset
+            Note over W: preserve cursor and wait durably
+            Q-->>W: grant after reset
+            W->>P: retry provider call
         end
     end
-    opt Provider reports quota exhaustion
-        W-->>Q: observe authoritative reset
-        Note over Q: Scope remains blocked until reset
-        Note over W: Retry preserves the provider cursor
-    end
 ```
 
-The pending queue is capped at 350 requests per quota scope. `permit_completed` releases the
-in-flight concurrency reservation; it does not refund provider quota. Only an authoritative quota
-observation or reset restores quota capacity.
+The pending queue is capped at 350 per scope. Completion releases the in-flight reservation; it
+does not invent or refund provider quota.
 
-## Page failure, checkpoint, and remediation
+## Northstar quota, held writer, fence, and cleanup
 
-Resource pages execute in a sliding window. Successful work after an earlier failure may run
-again, so document writes and deletes must be idempotent.
+The Northstar scenario makes the correctness boundary visible. The database row, not Activity
+cancellation, decides whether the late generation-7 write may commit.
 
 ```mermaid
-flowchart LR
-    input["Input cursor"] --> window["Start bounded page window"]
-    window --> results{"All page children succeeded?"}
-    results -->|"yes"| advance["Advance to next cursor"]
-    advance --> more{"More pages?"}
-    more -->|"yes"| window
-    more -->|"no"| complete["Return resource result"]
-    results -->|"no"| checkpoint["Checkpoint earliest failed page's input cursor"]
-    checkpoint --> partial["Return partial or failed user result"]
-    partial --> collect["Root collects bounded failed-user batches"]
-    collect --> remediation[["Start detached remediation<br/>stable ID, controller-tracked"]]
-    remediation --> recent["Sync recent data"]
-    recent --> fence["Revalidate lifecycle generation"]
-    fence --> backfill["Sync backfill"]
-    backfill --> done["Signal remediation finished"]
+sequenceDiagram
+    autonumber
+    actor U as Presenter
+    participant A as FastAPI App
+    participant T as Temporal workflows
+    participant Q as UserQuotaWorkflow
+    participant P as Scripted provider Activity
+    participant I as Ingestion Activities
+    participant D as Lakebase
+
+    U->>A: Create fresh Northstar run
+    A->>D: fixed seed function creates active generation 7
+    U->>A: Sync account
+    A->>T: request_sync Update-with-Start
+    T->>Q: request permit
+    Q-->>T: grant
+    T->>P: list_active_users
+    P->>D: atomically consume quota-once control
+    P-->>T: quota exhausted, retry after 5 seconds
+    T->>Q: record reset observation
+    Note over T,Q: durable wait; no Activity slot held
+    Q-->>T: grant after reset
+    T->>P: retry and fetch five DocumentRefs
+
+    par Four normal documents
+        T->>I: ingest generation 7
+        I->>D: lock store, verify 7/active, write document + chunks + receipt
+        D-->>I: committed
+    and Late security review
+        T->>I: ingest generation 7
+        I->>I: load, validate, parse, chunk
+        I->>D: append document_commit_held event
+        Note over I: bounded demo gate waits before transaction
+    end
+
+    U->>A: Ask account question
+    A->>D: current-generation Postgres FTS
+    D-->>A: cited committed evidence
+    U->>A: Deactivate workspace
+    A->>T: start_deactivation Update
+    T->>D: begin_deactivation(expected 7)
+    D-->>T: atomic active/7 -> deactivating/8
+    T-->>T: cancel sync, invalidate quota, drain
+    Note over I: demo-only gate survives cancellation long enough to prove the fence
+    U->>A: Release late write after fence
+    A->>D: set release_requested
+    I->>D: attempt generation-7 commit
+    D-->>I: stale_generation_rejected (actual 8)
+    T->>D: deactivate users at generation 8
+    loop batches of OBJECT_CLEANUP_BATCH_SIZE
+        T->>D: delete one bounded object batch at generation 8
+        D-->>T: documents/chunks deleted, remaining flag
+    end
+    T->>D: mark inactive only when all owned rows are zero
+    D-->>A: inactive / generation 8 / 0 documents / 0 chunks
 ```
 
-Root progress passed through Continue-As-New is cumulative, while error samples, failed-user
-samples, and remediation IDs remain bounded. A new store sync is rejected until remediation has
-finished.
+The hold hook is demo-only, heartbeat-aware, and capped at 30 seconds. It clears cancellation only
+inside this bounded external-wait simulation, then performs the normal repository call. Production
+Activity cancellation policy is unchanged.
 
-## Deactivation order and recovery
-
-The generation fence is the point of no return. It is committed before cancellation, making late
-Activity delivery safe: every persistent mutation compares the expected generation and allowed
-lifecycle state in the same transaction as its write.
+## Deactivation state and recovery
 
 ```mermaid
 flowchart TB
-    command["start_deactivation Update"]
-    start[["Start DeactivateStoreWorkflow<br/>stable generation-derived ID"]]
-    fence["Atomically commit lifecycle generation fence"]
-    acknowledge["Signal controller: fenced"]
-    cancel["Request cancellation of sync and remediation"]
-    quota["Invalidate this generation's quota requests"]
-    drain["Wait for controller-owned work to drain<br/>bounded timeout"]
-    users[["CleanupUsersWorkflow tree"]]
-    objects[["RemoveObjectsWorkflow"]]
-    inactive["Atomically mark store INACTIVE"]
-    terminal["Signal controller terminal result"]
-    prefail["Failure before fence<br/>store remains ACTIVE or SYNCING"]
-    postfail["Failure after fence<br/>mark DEACTIVATION_FAILED"]
-    retry["Retry same generation and stable ID"]
-    partial["Acknowledgement, cancellation, quota-signal,<br/>or drain warning; cleanup continues"]
-
-    command --> start --> fence --> acknowledge --> cancel --> quota --> drain --> users --> objects --> inactive --> terminal
-    start -.->|"failure before commit"| prefail
-    acknowledge -.->|"warning"| partial
-    cancel -.->|"warning"| partial
-    quota -.->|"warning"| partial
-    drain -.->|"warning"| partial
-    users -.->|"failure"| postfail
-    objects -.->|"failure"| postfail
-    inactive -.->|"failure"| postfail
-    postfail --> retry --> fence
+    command["start_deactivation"] --> fence{"Commit generation fence?"}
+    fence -->|"no"| prefail["Pre-fence failure<br/>store remains active/syncing"]
+    fence -->|"yes: N -> N+1"| ack["Signal controller fenced"]
+    ack --> cancel["Cancel owned sync/remediation"]
+    cancel --> quota["Invalidate generation-N quota requests"]
+    quota --> drain["Wait for controller drain<br/>bounded timeout"]
+    drain --> users["Generation-(N+1) user cleanup"]
+    users --> objects["Generation-(N+1) object batches"]
+    objects --> zero{"Users, state, documents,<br/>and chunks all zero?"}
+    zero -->|"yes"| inactive["Commit inactive at N+1"]
+    zero -->|"no or cleanup error"| failed["Commit deactivation_failed at N+1"]
+    failed --> retry["Repair dependency and retry<br/>same generation, stable identity"]
+    retry --> users
 ```
 
-Warnings do not interrupt cleanup, but they can produce a `PARTIAL` result. A committed generation
-is never decremented during a retry, deployment rollback, or operational recovery.
+Warnings from acknowledgement, cancellation, quota signaling, or drain timeout do not undo the
+fence; cleanup continues and may return a partial result. A committed generation is never
+decremented. The pre-batch `RemoveObjectsWorkflow` history is checked in and replayed through the
+versioned compatibility branch; new executions use bounded Activities and Continue-As-New when
+Temporal suggests it.
 
-## Ownership and concurrency summary
+## Data visibility and transaction rules
 
-| Boundary | Completion rule | Bound or barrier |
-|---|---|---|
-| Controller → root sync | Detached, stable ID, controller registry | One active sync per store |
-| Root sync → user sync | Joined children | User-page barrier or bounded round window |
-| User sync → resource sync | Joined children | `RESOURCE_CONCURRENCY` |
-| Resource pages → files page | Joined sliding window | `FILES_PAGE_WINDOW_SIZE` |
-| Files page → document ingestion | Joined children | Lower of the two configured per-page document bounds |
-| Root sync → remediation | Detached, stable ID, controller registry | Bounded activation batches and Continue-As-New |
-| Remediation → activation | Joined children | Bounded batch |
-| Activation → user sync | Sequential recent and backfill waves | Generation check between waves |
-| Provider request → quota | Shared Signal-with-Start coordinator | Per-scope in-flight and pending caps |
-| Controller → deactivation | Detached, stable generation ID | Fence before cancellation and bounded drain |
-| Deactivation → cleanup | Joined children | Bounded user batches, then object cleanup |
+| Operation | Required store state | Generation rule | Atomic effect |
+|---|---|---|---|
+| Document upsert/delete | `active` or `syncing` | expected equals current | document, chunks, and receipt commit together |
+| User/retrieval-state mutation | `active` or `syncing` | expected equals current | compare and mutation share a transaction |
+| Begin deactivation | active/syncing or resumable failed | expected current or idempotent replay | generation advances once and state becomes `deactivating` |
+| User/object cleanup | `deactivating` | cleanup generation equals current | bounded deletion only |
+| Mark inactive | `deactivating` | expected equals current | succeeds only after owned rows reach zero |
+| Search | `active` or `syncing` | chunk/document generation equals store current | stale and deactivating content is invisible |
+
+While the original generation remains current and writable, the same idempotency key plus the same
+canonical payload returns the stored result. Reusing the key for a different payload is a conflict.
+After a generation fence, the stale-generation decision takes precedence even when a historical
+receipt exists. These rules make Temporal's at-least-once Activity execution safe; they do not
+claim exactly-once execution.

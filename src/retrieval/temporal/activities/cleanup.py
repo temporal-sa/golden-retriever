@@ -20,6 +20,8 @@ class CleanupUsersRequest:
     store_key: str
     expected_generation: int
     user_keys: tuple[str, ...] = ()
+    batch_size: int = 250
+    batch_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,15 @@ class CleanupResult:
     status: ResultStatus
     affected: int = 0
     message: str | None = None
+    deleted_chunks: int = 0
+    remaining: bool = False
+
+
+def _heartbeat(value: object) -> None:
+    try:
+        activity.heartbeat(value)
+    except RuntimeError:
+        pass
 
 
 class CleanupActivities:
@@ -52,17 +63,62 @@ class CleanupActivities:
 
     @activity.defn(name="remove_objects_generation_fenced")
     async def remove_objects(self, command: CleanupUsersRequest) -> CleanupResult:
+        """Compatibility one-shot boundary for histories created before batching."""
+
+        deleted_documents = 0
+        deleted_chunks = 0
         try:
-            affected = await self._repository.remove_all_objects_if_current(
-                command.store_key, command.expected_generation
-            )
+            while True:
+                outcome = await self._repository.remove_object_batch_if_current(
+                    command.store_key,
+                    command.expected_generation,
+                    command.batch_size,
+                )
+                deleted_documents += outcome.deleted_documents
+                deleted_chunks += outcome.deleted_chunks
+                _heartbeat(
+                    {
+                        "documents_deleted": deleted_documents,
+                        "chunks_deleted": deleted_chunks,
+                    }
+                )
+                if not outcome.remaining:
+                    break
         except (StaleLifecycleGenerationError, LifecycleStateRejectedError) as exc:
             return self._failure(command, exc)
         return CleanupResult(
             store_key=command.store_key,
             expected_generation=command.expected_generation,
             status=ResultStatus.SUCCEEDED,
-            affected=affected,
+            affected=deleted_documents,
+            deleted_chunks=deleted_chunks,
+        )
+
+    @activity.defn(name="remove_object_batch_generation_fenced")
+    async def remove_object_batch(self, command: CleanupUsersRequest) -> CleanupResult:
+        try:
+            outcome = await self._repository.remove_object_batch_if_current(
+                command.store_key,
+                command.expected_generation,
+                command.batch_size,
+            )
+        except (StaleLifecycleGenerationError, LifecycleStateRejectedError) as exc:
+            return self._failure(command, exc)
+        _heartbeat(
+            {
+                "batch_id": command.batch_id,
+                "documents_deleted": outcome.deleted_documents,
+                "chunks_deleted": outcome.deleted_chunks,
+                "remaining": outcome.remaining,
+            }
+        )
+        return CleanupResult(
+            store_key=command.store_key,
+            expected_generation=command.expected_generation,
+            status=ResultStatus.SUCCEEDED,
+            affected=outcome.deleted_documents,
+            deleted_chunks=outcome.deleted_chunks,
+            remaining=outcome.remaining,
         )
 
     @staticmethod

@@ -1,49 +1,54 @@
 # Temporal history replay
 
-Replay detects nondeterministic workflow changes before a worker receives tasks from an existing
-execution. The test discovers every `*.json` file under `artifacts/histories/`, registers the
-workflow implementations in `workflow_registry.py`, and fails on the first incompatible history.
+Replay detects nondeterministic Workflow changes before a worker receives tasks from an existing
+execution. The test discovers every `*.json` file under `artifacts/histories`, registers the
+corresponding implementations in `workflow_registry.py`, and fails on incompatibility.
 
 ## Run the suite
-
-From the repository root:
 
 ```bash
 uv run pytest -m replay tests/replay
 ```
 
-The repository includes `root-sync-replay-smoke.json`, a successful local
-`RootSyncWorkflow` history. It keeps the replay harness active in the default test run, but it is
-not representative evidence for another namespace, deployment, or workflow path.
+Checked-in histories provide two focused compatibility samples:
 
-## Add representative histories
+| History | Coverage |
+|---|---|
+| `root-sync-replay-smoke.json` | successful local `RootSyncWorkflow` execution |
+| `remove-objects-pre-batch.json` | `RemoveObjectsWorkflow` compatibility branch for a one-shot object-cleanup payload |
 
-1. Export Workflow Event History JSON from the target Temporal namespace using its CLI, Web UI, or
-   API.
-2. Preserve the raw event history and place it under `artifacts/histories/`. Subdirectories may be
-   organized by environment, Workflow Type, build, or scenario.
-3. Use filenames that describe the workflow and behavior, such as
-   `root-sync/continue-as-new-after-page.json`.
-4. Run the replay suite against the exact source revision and dependency versions planned for the
-   worker artifact.
-5. Retain the history inventory and replay output with the release evidence.
+The second sample protects the `workflow.patched("bounded-object-cleanup-v1")` boundary. New
+executions use bounded cleanup Activities; histories recorded with the older payload replay through
+the preserved branch.
 
-Include every Workflow Type affected by a release and representative long-running, signaled,
-canceled, failed, retried, and Continue-As-New histories. Redact or encode sensitive payloads using
-the same codec support required by the worker; do not commit production secrets or customer
-content.
+These samples prove the harness and those exact paths. They are not representative evidence for
+another namespace, deployment, or every Workflow Type.
 
-Temporal CLI exports may omit the Workflow ID. The test uses the relative filename as a stable
-replay-only identity. If a payload codec needs the real ID, add a top-level `workflowId` string to
-the JSON object; the SDK ignores that extra field while parsing event history.
+## Add target histories
 
-If no JSON histories exist, the parametrized replay test reports an explicit skip. A release gate
-should separately verify that its required history inventory is complete so an empty directory
-cannot be mistaken for compatibility evidence.
+1. Export raw Workflow Event History JSON from the target Temporal namespace using its CLI, Web UI,
+   or API.
+2. Redact secrets/customer content or configure the same payload codec required by the worker.
+3. Place the history under `artifacts/histories`; organize subdirectories by environment, type,
+   build, or behavior as useful.
+4. Use descriptive names such as `root-sync/continue-as-new-after-page.json`.
+5. Add the Workflow Type to `workflow_registry.py` if it is not already registered.
+6. Replay with the exact source revision and dependency lock intended for the worker artifact.
+7. Archive the inventory and output with release evidence.
+
+Include long-running, signaled, canceled, failed, retried, patched, and Continue-As-New paths for
+every type affected by a release.
+
+Temporal CLI exports may omit Workflow ID. The test uses the relative filename as a replay-only
+identity. If a payload codec needs the real ID, add a top-level `workflowId` string; the SDK ignores
+that extra field when parsing event history.
+
+If no histories exist, the parametrized test reports an explicit skip. A release process must
+separately assert that its required inventory is complete so an empty directory cannot be mistaken
+for compatibility evidence.
 
 ## Compatibility rule
 
-A successful replay proves only that the selected code can replay the supplied histories. It does
-not prove that all open executions were sampled. Keep each open execution routed to a compatible
-worker build through Worker Versioning until it closes or transitions by an explicitly compatible
-Continue-As-New path.
+A successful replay proves only that this code can replay the supplied histories. It does not prove
+that all open executions were sampled. Keep each open execution routed to a compatible worker build
+through Worker Versioning until it closes or reaches an explicitly compatible Continue-As-New path.

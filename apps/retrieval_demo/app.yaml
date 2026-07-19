@@ -1,0 +1,28 @@
+command:
+  - python
+  - -m
+  - apps.retrieval_demo.app
+
+env:
+  - name: LAKEBASE_ENDPOINT
+    valueFrom: postgres
+  - name: TEMPORAL_ADDRESS
+    valueFrom: temporal-address
+  - name: TEMPORAL_NAMESPACE
+    valueFrom: temporal-namespace
+  - name: TEMPORAL_API_KEY
+    valueFrom: temporal-api-key
+  - name: TEMPORAL_TLS
+    value: "true"
+  - name: TEMPORAL_RETRIEVAL_TASK_QUEUE
+    value: retrieval-v2
+  - name: TEMPORAL_PROVIDER_TASK_QUEUE
+    value: retrieval-provider-v2
+  - name: RETRIEVAL_DEMO_MODE
+    value: "true"
+  - name: RETRIEVAL_SEARCH_BACKEND
+    value: postgres_text
+  - name: LAKEBASE_POOL_MIN_SIZE
+    value: "1"
+  - name: LAKEBASE_POOL_MAX_SIZE
+    value: "10"

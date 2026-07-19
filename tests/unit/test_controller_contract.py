@@ -37,7 +37,7 @@ WORKFLOW_CONTRACTS = (
             "remediation_started",
             "request_continue_as_new",
         },
-        {"get_status"},
+        {"get_operation_result", "get_status"},
         {"cancel_sync", "request_sync", "start_deactivation"},
     ),
     (

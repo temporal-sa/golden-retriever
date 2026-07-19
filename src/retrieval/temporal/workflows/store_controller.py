@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from temporalio import workflow
@@ -144,6 +144,15 @@ class StoreControllerWorkflow:
             active_deactivation_id=self._state.active_deactivation_id,
             recent_command_count=len(self._state.recent_command_results),
         )
+
+    @workflow.query(name="get_operation_result")
+    def get_operation_result(self, operation_id: str) -> CommandResult | None:
+        """Return one bounded command result without exposing the dedup map."""
+
+        for result in reversed(tuple(self._state.recent_command_results.values())):
+            if result.operation_id == operation_id and result.details.get("kind") != "cancellation":
+                return result
+        return None
 
     def _validate_store(self, store_key: str) -> None:
         if store_key != self._state.store_key:
@@ -489,6 +498,7 @@ class StoreControllerWorkflow:
                 command_id=command.command_id,
                 operation_id=workflow_id,
                 drain_timeout_seconds=(self._state.deactivation_drain_timeout_seconds),
+                object_cleanup_batch_size=self._state.object_cleanup_batch_size,
                 controller_workflow_id=workflow.info().workflow_id,
                 sync_workflow_ids=tuple(
                     registration.workflow_id for registration in self._state.active_syncs.values()
@@ -556,6 +566,21 @@ class StoreControllerWorkflow:
             OperationStatus.CANCELED,
             OperationStatus.REJECTED,
         }
+        if terminal:
+            for command_id, result in tuple(self._state.recent_command_results.items()):
+                if (
+                    result.operation_id != event.operation_id
+                    or result.details.get("kind") == "cancellation"
+                ):
+                    continue
+                self._state.recent_command_results[command_id] = replace(
+                    result,
+                    status=event.status,
+                    lifecycle_generation=event.lifecycle_generation,
+                    result_status=event.result_status,
+                    message=event.message,
+                    completed_at=workflow.now(),
+                )
         if event.operation_id in self._state.active_syncs and terminal:
             del self._state.active_syncs[event.operation_id]
             await self._forward_drained(event)
@@ -670,6 +695,14 @@ class StoreControllerWorkflow:
             **metadata_activity_options(),
         )
         self._state.lifecycle_generation = result.authoritative_generation
+        if self._state.active_deactivation_id is not None and result.lifecycle_state in {
+            StoreLifecycleState.DEACTIVATING,
+            StoreLifecycleState.INACTIVE,
+            StoreLifecycleState.DEACTIVATION_FAILED,
+        }:
+            # The durable database state is proof that the fence committed,
+            # even if its signal raced a Continue-As-New boundary.
+            self._state.active_deactivation_fenced = True
         self._state.lifecycle_state = (
             StoreLifecycleState.SYNCING
             if result.lifecycle_state is StoreLifecycleState.ACTIVE

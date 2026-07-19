@@ -20,6 +20,7 @@ from retrieval.temporal.models.lifecycle import (
 from retrieval.temporal.models.operations import (
     CancellationAccepted,
     CancelSyncCommand,
+    CommandResult,
     OperationAccepted,
     OperationType,
     StartDeactivationCommand,
@@ -89,6 +90,7 @@ class RetrievalClient:
                 deactivation_drain_timeout_seconds=(
                     self._config.deactivation_drain_timeout_seconds
                 ),
+                object_cleanup_batch_size=self._config.object_cleanup_batch_size,
                 enable_search_attributes=self._enable_search_attributes,
             ),
             id=store_controller_workflow_id(store_key),
@@ -157,3 +159,15 @@ class RetrievalClient:
     async def get_status(self, store_key: str) -> StoreControllerSnapshot:
         handle = self._client.get_workflow_handle(store_controller_workflow_id(store_key))
         return await handle.query("get_status", result_type=StoreControllerSnapshot)
+
+    async def get_operation_result(
+        self,
+        store_key: str,
+        operation_id: str,
+    ) -> CommandResult | None:
+        handle = self._client.get_workflow_handle(store_controller_workflow_id(store_key))
+        return await handle.query(
+            "get_operation_result",
+            operation_id,
+            result_type=CommandResult | None,
+        )
