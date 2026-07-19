@@ -1,5 +1,7 @@
 .git
 .github
+.databricks
+**/.databricks
 .venv
 .pytest_cache
 .ruff_cache

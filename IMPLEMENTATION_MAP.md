@@ -21,6 +21,8 @@ environment variable that configures it.
 | `src/retrieval/demo/` | Northstar fixtures, scripted provider, controls/events, hold hook, service, and demo migrations |
 | `apps/retrieval_demo/` | FastAPI App, static four-panel UI, App manifest, and Databricks bundle |
 | `Dockerfile.worker` | Separate long-lived Temporal worker image |
+| `Dockerfile.app` | Standalone FastAPI/UI image for tmprl-demo.cloud |
+| `docs/runbooks/deploy-tmprl-demo-cloud.md` | Registry, Lakebase, secret, and rollout procedure |
 | `app.yaml`, `requirements.txt` | Effective Databricks Apps root manifest and pinned App dependencies |
 | `.env.example` | Non-secret local full-stack configuration checklist |
 | `Makefile` | Repeatable install, verify, integration, replay, headless, and App commands |
@@ -169,6 +171,10 @@ adapter factories; keep them out of source/images and restrict files containing 
 | `RETRIEVAL_REPOSITORY_FACTORY` | unset | Repository factory |
 | `RETRIEVAL_STAGING_STORE_FACTORY` | unset | Staging factory |
 | `RETRIEVAL_PROVIDER_GATEWAY_FACTORY` | unset | Provider factory |
+
+`TEMPORAL_WORKER_DEPLOYMENT_NAME` and `TEMPORAL_WORKER_BUILD_ID` are accepted as fallbacks for
+`TEMPORAL_DEPLOYMENT_NAME` and `TEMPORAL_BUILD_ID`. This lets the same worker image consume the
+standard values injected by Temporal Worker Controller; the existing names retain precedence.
 
 ## Workflow tuning
 

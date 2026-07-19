@@ -111,6 +111,32 @@ def test_runtime_config_enables_tls_for_api_key_and_rejects_insecure_override() 
         )
 
 
+def test_runtime_config_reads_worker_controller_versioning_names() -> None:
+    runtime = TemporalRuntimeConfig.from_env(
+        {
+            "TEMPORAL_WORKER_DEPLOYMENT_NAME": "registry-retrieval",
+            "TEMPORAL_WORKER_BUILD_ID": "sha-1234",
+        }
+    )
+
+    assert runtime.deployment_name == "registry-retrieval"
+    assert runtime.build_id == "sha-1234"
+
+
+def test_runtime_config_prefers_existing_versioning_names_over_controller_aliases() -> None:
+    runtime = TemporalRuntimeConfig.from_env(
+        {
+            "TEMPORAL_DEPLOYMENT_NAME": "explicit-deployment",
+            "TEMPORAL_BUILD_ID": "explicit-build",
+            "TEMPORAL_WORKER_DEPLOYMENT_NAME": "controller-deployment",
+            "TEMPORAL_WORKER_BUILD_ID": "controller-build",
+        }
+    )
+
+    assert runtime.deployment_name == "explicit-deployment"
+    assert runtime.build_id == "explicit-build"
+
+
 @pytest.mark.asyncio
 async def test_partial_production_adapter_configuration_always_fails_closed() -> None:
     runtime = TemporalRuntimeConfig(

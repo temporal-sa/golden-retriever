@@ -54,8 +54,14 @@ class TemporalRuntimeConfig:
             provider_task_queue=source.get("TEMPORAL_PROVIDER_TASK_QUEUE", "retrieval-provider-v2"),
             api_key=api_key,
             tls=_bool(source, "TEMPORAL_TLS", bool(api_key)),
-            deployment_name=source.get("TEMPORAL_DEPLOYMENT_NAME", "retrieval-v2"),
-            build_id=source.get("TEMPORAL_BUILD_ID", "local"),
+            deployment_name=(
+                source.get("TEMPORAL_DEPLOYMENT_NAME")
+                or source.get("TEMPORAL_WORKER_DEPLOYMENT_NAME")
+                or "retrieval-v2"
+            ),
+            build_id=(
+                source.get("TEMPORAL_BUILD_ID") or source.get("TEMPORAL_WORKER_BUILD_ID") or "local"
+            ),
             use_worker_versioning=_bool(source, "TEMPORAL_USE_WORKER_VERSIONING"),
             register_legacy_drain_types=_bool(source, "TEMPORAL_REGISTER_LEGACY_DRAIN_TYPES"),
             server_priority_fairness_supported=_bool(

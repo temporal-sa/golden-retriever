@@ -29,6 +29,7 @@ networking, migrations, and readiness must still be validated in the intended ta
    Northstar architecture and presenter reference.
 5. Before any rollout, follow
    [`docs/runbooks/deploy-lakebase-temporal-demo.md`](docs/runbooks/deploy-lakebase-temporal-demo.md),
+   [`docs/runbooks/deploy-tmprl-demo-cloud.md`](docs/runbooks/deploy-tmprl-demo-cloud.md),
    [`docs/runbooks/migration-and-rollback.md`](docs/runbooks/migration-and-rollback.md), and the
    [`production-readiness guide`](docs/architecture-production-readiness.md).
 
@@ -267,6 +268,12 @@ uv run ruff format --check .
 uv run python -m compileall -q src tests apps
 uv build
 docker build -f Dockerfile.worker -t temporal-retrieval-worker:local .
+```
+
+Build the standalone web App image used by `tmprl-demo-cloud-registry`:
+
+```bash
+docker build -f Dockerfile.app -t temporal-retrieval-app:local .
 ```
 
 `make verify` runs the non-Docker verification sequence, including the headless rehearsal; it

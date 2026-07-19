@@ -46,6 +46,9 @@ retrieval-demo-migrate = "retrieval.demo.migrations:main"
 retrieval-demo-headless = "retrieval.demo.headless:main"
 retrieval-demo-app = "apps.retrieval_demo.app:main"
 
+[tool.hatch.build]
+exclude = ["**/.databricks/**"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/retrieval", "apps"]
 
