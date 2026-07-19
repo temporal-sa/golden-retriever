@@ -254,6 +254,12 @@ caller cannot supply an arbitrary store key.
 `TEMPORAL_WEB_BASE_URL` optionally enables safely encoded workflow deep links. It may be a base
 origin or a template containing `{namespace}` and `{workflow_id}`.
 
+The supported App executable loads the exact working-directory `.env`, or the file selected by
+`RETRIEVAL_ENV_FILE`, before reading its port and starting Uvicorn. Existing process values win and
+interpolation is disabled. Importing the module still reads no environment. Databricks deployments
+do not package local environment files; their resource, secret, and platform injection remains the
+runtime source of configuration.
+
 ## Runtime configuration
 
 The complete variable tables and factory precedence are maintained in
@@ -339,7 +345,7 @@ Validate the DAB from its own directory and never rely on an implicit Databricks
 
 ```bash
 cd apps/retrieval_demo
-databricks bundle validate --profile <PROFILE> -t dev \
+databricks bundle validate --strict --profile <PROFILE> -t dev \
   --var lakebase_branch=projects/<PROJECT>/branches/<BRANCH> \
   --var lakebase_database=projects/<PROJECT>/branches/<BRANCH>/databases/<DATABASE> \
   --var temporal_secret_scope=<SECRET_SCOPE>
@@ -348,7 +354,9 @@ databricks bundle validate --profile <PROFILE> -t dev \
 The bundle binds resource alias `postgres` with `CAN_CONNECT_AND_CREATE`, injects
 `LAKEBASE_ENDPOINT`, and maps Temporal address/namespace/API key from secrets. Bundle validation is
 read-only with respect to application deployment. The worker is deployed separately and is not a
-bundle App process.
+bundle App process. The bundle sync path promotes the repository root so the effective root
+`app.yaml`, pinned requirements, `apps`, and `src/retrieval` are deployed as one source tree;
+ignored `.env` files are not included.
 
 `CAN_CONNECT_AND_CREATE` is a managed database-level grant: the App service principal receives
 PostgreSQL `CONNECT` and `CREATE` on the selected database. Explicit runtime grants still constrain

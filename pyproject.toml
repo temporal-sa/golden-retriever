@@ -9,6 +9,7 @@ description = "Reference implementation of a generation-fenced Temporal retrieva
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "python-dotenv>=1.2,<2",
   "temporalio==1.30.0",
 ]
 

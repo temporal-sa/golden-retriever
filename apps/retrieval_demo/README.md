@@ -7,37 +7,43 @@ Temporal. It never runs workflow Activities itself.
 
 ## Local check
 
-From the repository root, install the demo dependencies, set the process-only Lakebase and Temporal
-environment variables described in the root documentation, and apply the schemas/grants as the
+From the repository root, install the demo dependencies and create the ignored per-role environment
+files described in the root documentation. The executable commands load the selected file without
+overriding variables already injected by the shell or runtime. Apply the schemas/grants as the
 migration owner:
 
 ```bash
 uv sync --extra dev
-uv run retrieval-lakebase-migrate
-uv run retrieval-demo-migrate
-uv run retrieval-lakebase-grant-roles \
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-migrate
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-demo-migrate
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-grant-roles \
   --app-role <APP_DB_ROLE> --worker-role <WORKER_DB_ROLE>
 ```
 
 Start `retrieval-worker` separately with the worker role:
 
 ```bash
-RETRIEVAL_DEMO_MODE=true \
-RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle \
-uv run retrieval-worker
+RETRIEVAL_ENV_FILE=.env.worker uv run retrieval-worker
 ```
 
 Then start the App with App-role credentials:
 
 ```bash
-RETRIEVAL_DEMO_MODE=true uv run retrieval-demo-app
+RETRIEVAL_ENV_FILE=.env.app uv run retrieval-demo-app
 ```
+
+If one local identity is acceptable, copy `.env.example` to `.env`, fill it in, run
+`chmod 600 .env`, and omit `RETRIEVAL_ENV_FILE`. The exact `.env` in the working directory is
+loaded; no parent directory search occurs. An empty selector disables loading. Environment-file
+interpolation is disabled, so `${NAME}` remains literal. Direct Python imports do not load a file.
 
 The local fallback URL is <http://127.0.0.1:8000>. `DATABRICKS_APP_PORT` overrides port 8000 and the
 server always binds to `0.0.0.0` as required by Databricks Apps.
 
 Importing `apps.retrieval_demo.app` does not inspect environment variables or make network calls.
 Configuration validation and connections happen inside the FastAPI lifespan.
+An external `uvicorn apps.retrieval_demo.app:app` launch bypasses the project executable and must
+receive an already-injected process environment; use `retrieval-demo-app` for automatic loading.
 
 Set `TEMPORAL_WEB_BASE_URL` to a Temporal Web origin to enable workflow deep links. The App appends
 `/namespaces/<namespace>/workflows/<workflow-id>`. A custom URL template may instead contain
@@ -55,7 +61,9 @@ target workspace; do not commit them:
 
 The `postgres` resource grants the App service principal `CAN_CONNECT_AND_CREATE` and injects the
 standard `PG*` variables plus `LAKEBASE_ENDPOINT`. Temporal values are injected from secrets; they
-are not present in source or bundle variables.
+are not present in source or bundle variables. The bundle syncs the repository root so the
+effective root `app.yaml`, requirements, `apps`, and `src/retrieval` are packaged together; ignored
+`.env` files are not shipped.
 
 The managed resource permission includes PostgreSQL `CONNECT` and `CREATE` on the selected
 database. Explicit repository grants narrow access to existing objects but do not revoke this
@@ -67,7 +75,7 @@ When an authenticated Databricks profile is available, validate from this direct
 workspace and variables:
 
 ```bash
-databricks bundle validate --profile <PROFILE> -t dev \
+databricks bundle validate --strict --profile <PROFILE> -t dev \
   --var lakebase_branch=projects/<PROJECT>/branches/<BRANCH> \
   --var lakebase_database=projects/<PROJECT>/branches/<BRANCH>/databases/<DATABASE> \
   --var temporal_secret_scope=<SECRET_SCOPE>
@@ -92,3 +100,6 @@ receive core DML.
 
 No App deployment has been performed from this repository. Live workspace authentication,
 Lakebase role mapping, networking, secret access, and readiness remain target-specific checks.
+Follow the repository's
+[`Lakebase + Temporal deployment runbook`](../../docs/runbooks/deploy-lakebase-temporal-demo.md)
+for the first-deploy bootstrap order, worker environment contract, verification, and rollback.

@@ -25,6 +25,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from retrieval.environment import inject_environment
+
 STATIC_DIRECTORY = Path(__file__).with_name("static")
 MAX_IDEMPOTENCY_KEY_LENGTH = 200
 
@@ -531,6 +533,7 @@ def main() -> None:
 
     import uvicorn
 
+    inject_environment()
     port = int(os.environ.get("DATABRICKS_APP_PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
 

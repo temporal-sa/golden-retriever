@@ -7,6 +7,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from retrieval.environment import inject_environment
+
 
 class GrantProvider(Protocol):
     def connection(self) -> Any: ...
@@ -123,6 +125,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--app-role", required=True, help="Databricks App database role")
     parser.add_argument("--worker-role", required=True, help="Temporal worker database role")
     args = parser.parse_args(argv)
+    inject_environment()
     asyncio.run(_run_cli(args))
 
 

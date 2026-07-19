@@ -52,6 +52,16 @@ def test_secret_env_files_are_excluded_from_git_and_worker_build_context() -> No
         assert "!.env.example" in patterns
 
 
+def test_databricks_bundle_syncs_required_repository_root() -> None:
+    bundle = (_REPOSITORY_ROOT / "apps/retrieval_demo/databricks.yml").read_text()
+
+    assert "sync:\n  paths:\n    - ../.." in bundle
+    assert "source_code_path: ../.." in bundle
+    assert "name: LAKEBASE_ENDPOINT\n            value_from: postgres" in bundle
+    assert "name: TEMPORAL_API_KEY\n            value_from: temporal-api-key" in bundle
+    assert "name: PGHOST" not in bundle
+
+
 def test_final_inventory_has_exactly_seventeen_v2_workflow_types() -> None:
     names = {
         workflow._Definition.must_from_class(workflow_type).name

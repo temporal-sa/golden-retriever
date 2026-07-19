@@ -7,6 +7,7 @@ environment variable that configures it.
 
 | Path | Responsibility |
 |---|---|
+| `src/retrieval/environment.py` | Exact-working-directory environment-file injection for executable processes |
 | `src/retrieval/config.py` | Validated workflow concurrency, quota, cleanup, timeout, and fairness settings |
 | `src/retrieval/content.py` | Strict UTF-8/frontmatter parsing and deterministic paragraph chunking |
 | `src/retrieval/temporal/client.py` | Application-facing `RetrievalClient` and controller commands |
@@ -42,6 +43,10 @@ environment variable that configures it.
 
 The App never hosts a Temporal worker. `retrieval-worker` starts two SDK workers: all Workflow Types
 and persistence Activities poll the retrieval queue; provider Activities poll the provider queue.
+
+The environment-consuming commands (`retrieval-worker`, both migration commands, the grant command,
+and `retrieval-demo-app`) load process configuration once at startup. `retrieval-test-starter` and
+`retrieval-demo-headless` are self-contained and do not load an environment file.
 
 ## Workflow inventory
 
@@ -129,8 +134,24 @@ identity. The `credential_key` in a quota scope is an opaque account identifier,
 
 ## Temporal process configuration
 
+### Environment-file injection
+
+The supported executable entry points inspect exactly `.env` in their current working directory.
+They never search parent directories and never load a file merely because a Python module or config
+class was imported. Set `RETRIEVAL_ENV_FILE` to select an explicit absolute or working-directory-
+relative file; set it to an empty string to disable loading. A missing default file is a no-op, while
+a missing or non-file explicit path fails startup.
+
+File values only fill names absent from the existing process environment, including preserving an
+existing empty value. Shell, container, and Databricks resource/secret injection therefore remain
+authoritative. `${NAME}` expressions are intentionally left literal rather than interpolating
+process secrets. Environment files are trusted local configuration because they can select Python
+adapter factories; keep them out of source/images and restrict files containing secrets to mode
+`0600`.
+
 | Environment variable | Default | Meaning |
 |---|---|---|
+| `RETRIEVAL_ENV_FILE` | exact working-directory `.env` | Explicit environment file; empty disables loading |
 | `TEMPORAL_ADDRESS` | `localhost:7233` | Temporal frontend |
 | `TEMPORAL_NAMESPACE` | `default` | Workflow namespace |
 | `TEMPORAL_API_KEY` | unset | API credential |

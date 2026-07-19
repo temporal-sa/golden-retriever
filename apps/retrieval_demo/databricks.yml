@@ -2,6 +2,10 @@ bundle:
   name: lakebase-temporal-demo-app
   databricks_cli_version: ">= 0.299.0"
 
+sync:
+  paths:
+    - ../..
+
 variables:
   lakebase_branch:
     description: Full Lakebase branch resource name (projects/.../branches/...)

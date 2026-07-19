@@ -20,6 +20,7 @@ from temporalio.common import (
 from temporalio.worker import Worker, WorkerDeploymentConfig
 
 from retrieval.config import RetrievalTemporalConfig
+from retrieval.environment import inject_environment
 from retrieval.temporal.activities.cleanup import CleanupActivities
 from retrieval.temporal.activities.hooks import (
     BeforeDocumentCommitHook,
@@ -425,6 +426,7 @@ async def run_worker() -> None:
 
 
 def main() -> None:
+    inject_environment()
     asyncio.run(run_worker())
 
 

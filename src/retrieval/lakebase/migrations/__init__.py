@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from importlib.resources import files
 from typing import Any, Protocol
 
+from retrieval.environment import inject_environment
 from retrieval.lakebase.config import LakebaseConfig
 from retrieval.lakebase.connection import LakebaseConnectionProvider
 
@@ -251,6 +252,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.check and args.target_version is not None:
         parser.error("--target-version cannot be combined with --check")
+    inject_environment()
     raise SystemExit(asyncio.run(_run_cli(args)))
 
 

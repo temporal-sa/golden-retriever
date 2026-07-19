@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 from importlib.resources import files
 from typing import Any, Protocol
 
+from retrieval.environment import inject_environment
+
 
 class DemoMigrationError(RuntimeError):
     pass
@@ -198,6 +200,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable status")
     args = parser.parse_args(argv)
+    inject_environment()
     raise SystemExit(asyncio.run(_run_cli(args)))
 
 

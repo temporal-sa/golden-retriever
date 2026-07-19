@@ -28,7 +28,8 @@ networking, migrations, and readiness must still be validated in the intended ta
 4. Use [`docs/lakebase-temporal-demo-spec.md`](docs/lakebase-temporal-demo-spec.md) as the as-built
    Northstar architecture and presenter reference.
 5. Before any rollout, follow
-   [`docs/runbooks/migration-and-rollback.md`](docs/runbooks/migration-and-rollback.md) and the
+   [`docs/runbooks/deploy-lakebase-temporal-demo.md`](docs/runbooks/deploy-lakebase-temporal-demo.md),
+   [`docs/runbooks/migration-and-rollback.md`](docs/runbooks/migration-and-rollback.md), and the
    [`production-readiness guide`](docs/architecture-production-readiness.md).
 
 ## Mental model
@@ -117,8 +118,17 @@ Lakebase/Postgres database.
 
 ### 1. Configure the processes
 
-Use the standard `PG*` variables injected by Databricks Apps. For Lakebase OAuth, set the endpoint
-resource path and rely on normal Databricks SDK authentication:
+The executable worker, App, migration, and grant commands automatically load `.env` from the
+current working directory. Start with the complete, non-secret checklist and restrict the local
+copy because it can contain credentials:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+Fill in the standard `PG*` values. For Lakebase OAuth, set the endpoint resource path and rely on
+normal Databricks SDK authentication:
 
 ```bash
 export PGHOST=<database-host>
@@ -134,8 +144,34 @@ export TEMPORAL_TLS=false
 export RETRIEVAL_DEMO_MODE=true
 ```
 
-`.env.example` is a complete non-secret checklist. Copy it for local use if helpful, but load the
-values into each process explicitly; the worker and App do not silently load `.env` files.
+Environment injection is deliberately non-overriding: values already supplied by the shell,
+container platform, or Databricks resource/secret binding win over file values. Only the exact
+`.env` in the working directory is discovered; parent directories are not searched. To select a
+different file, set `RETRIEVAL_ENV_FILE`, for example:
+
+```bash
+RETRIEVAL_ENV_FILE=.env.worker uv run retrieval-worker
+```
+
+An empty `RETRIEVAL_ENV_FILE` disables loading. An explicit path that is missing or is not a file
+fails at startup. `${NAME}` expressions remain literal rather than reading other process secrets.
+Library imports and direct config-object construction never load files.
+
+The single `.env` is the shortest local path when one database identity is acceptable. For a
+least-privilege rehearsal, instead create ignored `.env.migration`, `.env.worker`, and `.env.app`
+files from the example, put the appropriate `PGUSER` and authentication in each, and restrict all
+three to mode `0600`:
+
+```bash
+cp .env.example .env.migration
+cp .env.example .env.worker
+cp .env.example .env.app
+chmod 600 .env.migration .env.worker .env.app
+```
+
+The role-specific commands below select those files. If you chose the single `.env`, omit each
+`RETRIEVAL_ENV_FILE=...` prefix. Put shared Temporal settings in every role-specific file or inject
+them through the shell/secret manager. Never commit any of them.
 
 For an SSL-enabled local Postgres instance, omit `LAKEBASE_ENDPOINT` and set `PGPASSWORD` instead.
 Do not set both. Canonical `PG*` names take precedence over `LAKEBASE_HOST`, `LAKEBASE_PORT`,
@@ -146,12 +182,12 @@ Do not set both. Canonical `PG*` names take precedence over `LAKEBASE_HOST`, `LA
 Run migrations with the migration identity, not the eventual App or worker identity:
 
 ```bash
-uv run retrieval-lakebase-migrate
-uv run retrieval-demo-migrate
-uv run retrieval-lakebase-grant-roles \
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-migrate
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-demo-migrate
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-grant-roles \
   --app-role <APP_DB_ROLE> --worker-role <WORKER_DB_ROLE>
-uv run retrieval-lakebase-migrate --check --json
-uv run retrieval-demo-migrate --check --json
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-migrate --check --json
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-demo-migrate --check --json
 ```
 
 Core migrations create `retrieval`; demo migrations create `retrieval_demo_ui` and the fixed
@@ -165,8 +201,7 @@ worker roles; it does not create roles. Review the exact grants in the
 Leave Temporal running, then start the worker in its own terminal:
 
 ```bash
-export RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle
-uv run retrieval-worker
+RETRIEVAL_ENV_FILE=.env.worker uv run retrieval-worker
 ```
 
 The bundle shares one Lakebase connection pool across the repository, scripted provider controls,
@@ -179,7 +214,7 @@ factory variables or the unsafe in-memory flag.
 In another terminal, with App-role database credentials and the same Temporal settings:
 
 ```bash
-uv run retrieval-demo-app
+RETRIEVAL_ENV_FILE=.env.app uv run retrieval-demo-app
 ```
 
 Then verify and open it:
@@ -249,7 +284,7 @@ The App bundle is rooted in `apps/retrieval_demo`. Always choose the workspace p
 
 ```bash
 cd apps/retrieval_demo
-databricks bundle validate --profile <PROFILE> -t dev \
+databricks bundle validate --strict --profile <PROFILE> -t dev \
   --var lakebase_branch=projects/<PROJECT>/branches/<BRANCH> \
   --var lakebase_database=projects/<PROJECT>/branches/<BRANCH>/databases/<DATABASE> \
   --var temporal_secret_scope=<SECRET_SCOPE>
@@ -260,6 +295,11 @@ binds the App to a `postgres` resource with `CAN_CONNECT_AND_CREATE` and reads T
 namespace, and API key from three secret resources. The Temporal worker is intentionally absent
 from the App process and must be run from the separate container or another long-lived compute
 service.
+
+The bundle sync root includes the repository root because the effective `app.yaml`, pinned
+requirements, `apps` package, and `src/retrieval` package all live there. `.env` and `*.env` files
+are excluded from Git, Docker, and bundle source; the deployed App receives its environment only
+from Databricks resource, secret, and platform injection.
 
 Databricks maps `CAN_CONNECT_AND_CREATE` to database `CONNECT` and `CREATE` for the App service
 principal. The repository's grant command narrows table, schema-object, and function access, but it
