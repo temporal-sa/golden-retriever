@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio import workflow
@@ -50,17 +50,6 @@ class CleanupUsersRequest:
     store_key: str
     expected_generation: int
     user_keys: tuple[str, ...] = ()
-    batch_size: int = 250
-    batch_id: str = ""
-
-
-@dataclass(frozen=True)
-class LegacyCleanupUsersRequest:
-    """Exact pre-batching Activity payload retained for replay compatibility."""
-
-    store_key: str
-    expected_generation: int
-    user_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -70,8 +59,6 @@ class CleanupResult:
     status: ResultStatus
     affected: int = 0
     message: str | None = None
-    deleted_chunks: int = 0
-    remaining: bool = False
 
 
 def _cleanup_workflow_id(kind: str, command: CleanupWorkflowInput, *parts: str) -> str:
@@ -89,16 +76,6 @@ def _activity_request(command: CleanupWorkflowInput) -> CleanupUsersRequest:
         store_key=command.store_key,
         expected_generation=command.lifecycle_generation,
         user_keys=command.user_keys,
-        batch_size=command.object_batch_size,
-        batch_id=f"{command.object_batch_index}",
-    )
-
-
-def _legacy_activity_request(command: CleanupWorkflowInput) -> LegacyCleanupUsersRequest:
-    return LegacyCleanupUsersRequest(
-        store_key=command.store_key,
-        expected_generation=command.lifecycle_generation,
-        user_keys=command.user_keys,
     )
 
 
@@ -107,23 +84,10 @@ async def _execute_cleanup_activity(
 ) -> CleanupResult:
     return await workflow.execute_activity(
         activity_name,
-        _legacy_activity_request(command),
-        result_type=CleanupResult,
-        start_to_close_timeout=_ACTIVITY_START_TO_CLOSE,
-        schedule_to_close_timeout=_ACTIVITY_SCHEDULE_TO_CLOSE,
-        retry_policy=_ACTIVITY_RETRY_POLICY,
-        cancellation_type=ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-    )
-
-
-async def _execute_object_batch_activity(command: CleanupWorkflowInput) -> CleanupResult:
-    return await workflow.execute_activity(
-        "remove_object_batch_generation_fenced",
         _activity_request(command),
         result_type=CleanupResult,
         start_to_close_timeout=_ACTIVITY_START_TO_CLOSE,
         schedule_to_close_timeout=_ACTIVITY_SCHEDULE_TO_CLOSE,
-        heartbeat_timeout=timedelta(seconds=30),
         retry_policy=_ACTIVITY_RETRY_POLICY,
         cancellation_type=ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
     )
@@ -263,43 +227,7 @@ class CleanupUsersWorkflow:
 class RemoveObjectsWorkflow:
     @workflow.run
     async def run(self, command: CleanupWorkflowInput) -> CleanupResult:
-        if not workflow.patched("bounded-object-cleanup-v1"):
-            return await _execute_cleanup_activity("remove_objects_generation_fenced", command)
-
-        if command.object_batch_size <= 0:
-            raise ValueError("object_batch_size must be positive")
-        documents_deleted = command.documents_deleted
-        chunks_deleted = command.chunks_deleted
-        batch_index = command.object_batch_index
-        while True:
-            batch_command = replace(command, object_batch_index=batch_index)
-            result = await _execute_object_batch_activity(batch_command)
-            documents_deleted += result.affected
-            chunks_deleted += result.deleted_chunks
-            if result.status is not ResultStatus.SUCCEEDED:
-                return replace(
-                    result,
-                    affected=documents_deleted,
-                    deleted_chunks=chunks_deleted,
-                )
-            if not result.remaining:
-                return CleanupResult(
-                    store_key=command.store_key,
-                    expected_generation=command.lifecycle_generation,
-                    status=ResultStatus.SUCCEEDED,
-                    affected=documents_deleted,
-                    deleted_chunks=chunks_deleted,
-                )
-            batch_index += 1
-            if workflow.info().is_continue_as_new_suggested():
-                workflow.continue_as_new(
-                    replace(
-                        command,
-                        object_batch_index=batch_index,
-                        documents_deleted=documents_deleted,
-                        chunks_deleted=chunks_deleted,
-                    )
-                )
+        return await _execute_cleanup_activity("remove_objects_generation_fenced", command)
 
 
 __all__ = [

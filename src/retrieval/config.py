@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 import re
 from collections.abc import Mapping
@@ -43,12 +42,9 @@ def _parse_optional_float(
     if raw is None or not raw.strip():
         return default
     try:
-        value = float(raw)
+        return float(raw)
     except ValueError as exc:
         raise ConfigurationError(f"{name} must be a number") from exc
-    if not math.isfinite(value):
-        raise ConfigurationError(f"{name} must be a finite number")
-    return value
 
 
 def _parse_bool(environ: Mapping[str, str], name: str, default: bool) -> bool:
@@ -92,7 +88,6 @@ class RetrievalTemporalConfig:
     files_page_window_size: int = 5
     files_per_page_concurrency: int = 10
     document_ingestion_concurrency: int = 20
-    object_cleanup_batch_size: int = 250
     user_quota_max_in_flight: int = 4
     user_quota_max_pending_requests: int = MAX_QUOTA_PENDING_REQUESTS
     user_quota_dedup_window_size: int = 2_000
@@ -112,7 +107,6 @@ class RetrievalTemporalConfig:
             "files_page_window_size",
             "files_per_page_concurrency",
             "document_ingestion_concurrency",
-            "object_cleanup_batch_size",
             "user_quota_max_in_flight",
             "user_quota_max_pending_requests",
             "user_quota_dedup_window_size",
@@ -130,7 +124,7 @@ class RetrievalTemporalConfig:
             "temporal_fairness_key_rps_default",
         ):
             value = getattr(self, name)
-            if value is not None and (not math.isfinite(value) or value <= 0):
+            if value is not None and value <= 0:
                 raise ConfigurationError(f"{name} must be greater than zero when set")
 
         if self.user_quota_dedup_window_size < self.user_quota_max_in_flight:
@@ -193,11 +187,6 @@ class RetrievalTemporalConfig:
                 source,
                 "DOCUMENT_INGESTION_CONCURRENCY",
                 defaults.document_ingestion_concurrency,
-            ),
-            object_cleanup_batch_size=_parse_int(
-                source,
-                "OBJECT_CLEANUP_BATCH_SIZE",
-                defaults.object_cleanup_batch_size,
             ),
             user_quota_max_in_flight=_parse_int(
                 source,

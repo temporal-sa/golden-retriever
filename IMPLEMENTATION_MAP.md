@@ -1,310 +1,221 @@
-# Implementation map
+# Codebase guide
 
-This page connects system concepts to source files, executable commands, configuration, and
-database objects. Read the root [README](README.md) first if Temporal, Lakebase, or the Northstar
-scenario are unfamiliar.
+This guide maps the runtime design to the source tree. It is the reference for finding a workflow,
+understanding its ownership boundary, and configuring a worker process.
 
-## Find what you need
+## Package layout
 
-| Question | Start here |
+All application code lives under `src/retrieval/`:
+
+| Path | Purpose |
 |---|---|
-| How does a caller submit work? | `src/retrieval/temporal/client.py` |
-| Where are workflows registered? | `src/retrieval/temporal/worker.py` |
-| Where is lifecycle safety enforced? | `src/retrieval/lakebase/repository.py` and the core migrations |
-| How are provider bodies staged and verified? | `src/retrieval/content.py`, Activity code, and `src/retrieval/demo/fixtures.py` |
-| How does search work? | `src/retrieval/lakebase/search.py` |
-| Where is the HTTP API/UI? | `apps/retrieval_demo` |
-| How is the Databricks App deployed? | `apps/retrieval_demo/databricks.yml` and root `app.yaml` |
-| How is the worker packaged? | `Dockerfile.worker` |
-| How are schemas created? | `src/retrieval/lakebase/migrations` and `src/retrieval/demo/migrations` |
-| Which environment variable controls a behavior? | [Configuration reference](#configuration-reference) |
-| Which test proves a behavior? | `tests/unit`, `tests/contract`, `tests/lakebase`, `tests/demo`, `tests/app`, and the specialized test guides |
+| `config.py` | Validated workflow concurrency, quota, timeout, and fairness settings |
+| `temporal/client.py` | Application-facing `RetrievalClient` and controller commands |
+| `temporal/runtime_config.py` | Temporal connection, Task Queue, deployment, and adapter settings |
+| `temporal/worker.py` | Workflow and Activity registration; worker process entry point |
+| `temporal/test_starter.py` | Executable local sync/deactivation smoke test |
+| `temporal/models/` | Serializable workflow inputs, results, lifecycle state, quota state, and document references |
+| `temporal/common/` | Deterministic IDs, scheduling priorities, metrics, Search Attributes, and quota waiting |
+| `temporal/activities/` | Provider, persistence, ingestion, cleanup, lifecycle, and quota-bridge Activities |
+| `temporal/workflows/` | The registered workflow implementations |
 
-## Source tree
+Tests are divided into fast unit/contract tests, opt-in Temporal integration tests, exported
+history replay, and an opt-in synthetic load harness.
 
-| Path | Responsibility |
+## Runtime entry points
+
+| Entry point | Use |
 |---|---|
-| `src/retrieval/environment.py` | Safe, exact-directory `.env` injection for executable processes |
-| `src/retrieval/config.py` | Workflow concurrency, quota, cleanup, timeout, and fairness settings |
-| `src/retrieval/content.py` | UTF-8/frontmatter validation and deterministic paragraph chunking |
-| `src/retrieval/temporal/client.py` | Public `RetrievalClient` and store-controller commands |
-| `src/retrieval/temporal/runtime_config.py` | Temporal address, namespace, queues, versioning, and adapter selection |
-| `src/retrieval/temporal/worker.py` | Workflow/Activity registration and worker process lifecycle |
-| `src/retrieval/temporal/models` | Small JSON-safe workflow inputs and results |
-| `src/retrieval/temporal/common` | Stable IDs, quota helpers, metrics, priorities, and Search Attributes |
-| `src/retrieval/temporal/activities` | External-I/O boundaries and adapter protocols |
-| `src/retrieval/temporal/workflows` | Deterministic Workflow implementations |
-| `src/retrieval/lakebase` | Postgres config/pool, repository, search, migrations, and grants |
-| `src/retrieval/google_drive` | Read-only Drive client, recursive provider, shared staging, reconciliation, and worker bundle |
-| `src/retrieval/demo` | Northstar scenario, scripted provider, controls, events, hold gate, and service |
-| `apps/retrieval_demo` | FastAPI routes, static UI, App manifest, and Databricks bundle |
-| `tests` | Default and opt-in verification suites |
+| `uv run retrieval-worker` | Run the retrieval and provider workers against a Temporal namespace |
+| `uv run retrieval-test-starter` | Start isolated local workers and verify sync plus deactivation |
+| `RetrievalClient` | Submit idempotent sync, cancellation, and deactivation commands from Python |
 
-## Executable entry points
+`retrieval-worker` starts two Temporal `Worker` instances in one process. The retrieval worker
+hosts every Workflow Type and all persistence-facing Activities. The provider worker isolates
+provider API calls on a separately rate-limited Task Queue.
 
-| Command | Purpose | External services |
+## Workflow inventory
+
+`temporal/worker.py::V2_WORKFLOW_TYPES` is the authoritative registry. The replay registry mirrors
+these 17 Workflow Types.
+
+| Workflow Type | Responsibility | Completion relationship |
 |---|---|---|
-| `uv run retrieval-demo-headless --json` | Rehearse the Northstar state transitions in memory | none |
-| `uv run retrieval-test-starter` | Run a local sync/deactivation workflow smoke test | Temporal |
-| `uv run retrieval-worker` | Poll the retrieval and provider Task Queues | Temporal and configured adapters |
-| `uv run retrieval-lakebase-migrate` | Apply/check the core `retrieval` schema | Postgres |
-| `uv run retrieval-demo-migrate` | Apply/check the `retrieval_demo_ui` schema | Postgres |
-| `uv run retrieval-lakebase-grant-roles` | Apply explicit App and worker grants | Postgres |
-| `uv run retrieval-demo-app` | Serve the FastAPI API and browser UI | Postgres and Temporal |
+| `StoreControllerWorkflow` | One durable lifecycle and operation owner per store | Long-lived; starts detached operations |
+| `RootSyncWorkflow` | Enumerate users in ordinary pages or bounded rounds; aggregate progress | Detached from controller; joins user work |
+| `FailedUserRemediationWorkflow` | Retry failed user batches and report durable ownership | Detached from root; tracked by controller |
+| `ActivateUserWorkflow` | Run recent sync, revalidate generation, run backfill, activate user | Joined by remediation |
+| `UserSyncWorkflow` | Fan out over configured resource types | Joined by root or activation |
+| `ResourceSyncWorkflow` | Own one resource cursor and page policy | Joined by user sync |
+| `ResourcePagesWorkflow` | Fetch provider pages with a sliding child window and safe checkpoint | Joined by resource sync |
+| `FilesPageWorkflow` | Fan out document upserts and deletions for one provider page | Joined by resource pages |
+| `DocumentIngestionWorkflow` | Run one staged, generation-fenced document mutation | Joined by files page |
+| `CommentsResyncWorkflow` | Direct comments-resource entry that delegates to resource sync | Joins resource sync |
+| `UserQuotaWorkflow` | Coordinate FIFO provider permits for one external quota scope | Shared, long-lived workflow |
+| `DeactivateStoreWorkflow` | Fence, cancel, drain, clean up, and finish store deactivation | Detached from controller |
+| `CleanupUsersWorkflow` | Deactivate users in bounded batches | Joined by deactivation |
+| `DeactivateUserWorkflow` | Route one user cleanup to its mutation child | Joined by cleanup-users |
+| `DeactivateOneUserWorkflow` | Perform one user deactivation Activity | Joined |
+| `DeactivateAllUsersWorkflow` | Perform all-user deactivation | Joined |
+| `RemoveObjectsWorkflow` | Remove remaining retrieval objects | Joined by deactivation |
 
-The App never hosts a Temporal worker. `retrieval-worker` starts two SDK workers in one process:
-workflows and persistence Activities poll the retrieval queue; provider Activities poll the
-provider queue.
+`QuotaWaitWorkflow` and `AccessioningWorkflow` exist only as optional drain-only registrations.
+No primary execution path starts them. Set `TEMPORAL_REGISTER_LEGACY_DRAIN_TYPES=true` only when a
+compatible deployment must continue polling histories that contain those names; the placeholders
+in this repository are not substitutes for the original workflow code.
 
-The worker, App, migration commands, and grant command load configuration once at startup. The
-headless rehearsal and local starter are self-contained.
+## Activity and adapter boundaries
 
-## Workflow registry
+Workflow code performs no direct network, database, filesystem, or clock-dependent side effects.
+Activities call three injected ports:
 
-`retrieval.temporal.worker.V2_WORKFLOW_TYPES` is the authoritative runtime registry. The replay
-registry mirrors the implementations required by checked-in histories.
-
-| Workflow | Responsibility | Lifetime |
+| Port | Production responsibility | Included local implementation |
 |---|---|---|
-| `StoreControllerWorkflow` | Serialize one store's commands and operation status | long-lived authority |
-| `RootSyncWorkflow` | Enumerate users and aggregate sync progress | controller-owned detached operation |
-| `FailedUserRemediationWorkflow` | Retry bounded failed-user sets | controller-owned detached operation |
-| `ActivateUserWorkflow` | Recent sync, generation recheck, backfill, activation | joined child |
-| `UserSyncWorkflow` | Bound resource fan-out for one user | joined child |
-| `ResourceSyncWorkflow` | Own one resource cursor and page policy | joined child |
-| `ResourcePagesWorkflow` | Maintain the sliding page window/checkpoint | joined child |
-| `FilesPageWorkflow` | Bound document upsert/delete fan-out | joined child |
-| `DocumentIngestionWorkflow` | Load and commit one generation-fenced document | joined child |
-| `CommentsResyncWorkflow` | Optional direct comments boundary | registered delegate |
-| `UserQuotaWorkflow` | Share provider admission/reset state | shared long-lived coordinator |
-| `DeactivateStoreWorkflow` | Fence, cancel, drain, clean, and finish | controller-owned detached operation |
-| `CleanupUsersWorkflow` | Route bounded user cleanup | joined child |
-| `DeactivateUserWorkflow` | Route one user's cleanup | joined child |
-| `DeactivateOneUserWorkflow` | Execute one-user deactivation | joined child |
-| `DeactivateAllUsersWorkflow` | Execute all-user deactivation | joined child |
-| `RemoveObjectsWorkflow` | Delete bounded object batches and Continue-As-New | joined child |
+| `RetrievalRepository` | Authoritative lifecycle, generation, user, retrieval-state, and document mutations | `InMemoryRetrievalRepository` |
+| `StagingStore` | Durable document-body lookup by `staging_uri` | `InMemoryStagingStore` |
+| `ProviderGateway` | User listing, resource pagination, authentication, and quota error mapping | `EmptyProviderGateway` |
 
-`QuotaWaitWorkflow` and `AccessioningWorkflow` are optional drain-only names. No new execution
-starts them. Register them only when a known deployment needs those names to drain; placeholders
-cannot replay an arbitrary historical implementation.
+Production repository methods must compare the expected generation and allowed lifecycle state in
+the same transaction as every write. Provider implementations stage bodies outside Temporal and
+return compact `DocumentRef` values. They must translate provider exhaustion into
+`ProviderQuotaExhausted` so the workflow can update shared quota state.
 
-## Activities and adapters
+The worker loads production implementations through zero-argument `module:function` factories.
+All three factories are required together; partial configuration always fails startup.
 
-Workflow code performs no database, filesystem, network, or wall-clock I/O. Activities call these
-ports and hooks:
+## Commands and controller state
 
-| Port or hook | Included implementations |
-|---|---|
-| `RetrievalRepository` | in-memory repository; `LakebaseRetrievalRepository` |
-| `StagingStore` | in-memory staging; manifest-restricted fixture staging; content-addressed Drive staging |
-| `ProviderGateway` | empty local provider; scripted Northstar provider; read-only Google Drive provider |
-| `BeforeDocumentCommitHook` | no-op; bounded Northstar pre-commit hold |
-| `IngestionEventSink` | no-op; durable Northstar event sink |
+`RetrievalClient` uses Update-with-Start so the first command can atomically create the controller.
+Each command has a stable `command_id` used for bounded deduplication.
 
-`AdapterBundle` owns one process-wide set of ports and closes each unique resource during worker
-shutdown. The Northstar worker selects its bundle with:
+| Command | Accepted when | Result |
+|---|---|---|
+| `request_sync` | Generation matches; store is active; no sync, remediation, or deactivation is active | `OperationAccepted` for a stable root-sync ID |
+| `cancel_sync` | The operation belongs to the store controller | `CancellationAccepted` |
+| `start_deactivation` | Generation matches and no deactivation is active | `OperationAccepted` for the generation-derived deactivation ID |
+| `get_status` | Controller exists | `StoreControllerSnapshot` |
 
-```text
-RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle
-```
+The controller lifecycle states are `ACTIVE`, `SYNCING`, `DEACTIVATING`, `INACTIVE`, and
+`DEACTIVATION_FAILED`. A store stays `SYNCING` until both its root sync and all detached
+remediations finish.
 
-The Google Drive + Lakebase bundle is `retrieval.google_drive.bundle:create_adapter_bundle`. See the
-[Google Drive integration guide](docs/google-drive-integration.md) for authentication, staging,
-supported MIME types, reconciliation, and sync metadata.
+## Sync command policy
 
-Adapter configuration is fail-closed. Choose exactly one of these modes:
+`RetrievalClient.request_sync` copies validated process configuration into string-valued
+`SyncCommand.metadata` unless the caller already supplied a value. The controller parses that
+metadata into the typed root input.
 
-1. set `RETRIEVAL_ADAPTER_BUNDLE_FACTORY`; or
-2. set all three individual repository, staging, and provider factory variables; or
-3. for private local testing only, set `RETRIEVAL_ALLOW_UNSAFE_IN_MEMORY_ADAPTERS=true`.
+| Metadata key | Default | Purpose |
+|---|---|---|
+| `mode` | `ordinary` | `ordinary` processes each user page as a barrier; `round` gives active users bounded page slices |
+| `resource_types` | `files` | Comma-separated resource names processed for each user |
+| `provider` + `credential_key` | unset | Together enable a shared quota scope; `credential_key` is opaque identity, never a secret |
+| `quota_class` | `default` | Provider quota bucket within the credential scope |
+| `fairness_weight` | `1` | Relative scheduling weight from 0.001 through 1000 when Priority/Fairness is active |
+| `max_active_users` | `STORE_SYNC_MAX_ACTIVE_USERS` | Ordinary-mode concurrent user children |
+| `user_page_size` | `STORE_SYNC_USER_PAGE_SIZE` | Active users requested per provider call |
+| `round_user_window_size` | `ROUND_USER_WINDOW_SIZE` | Users admitted to one round |
+| `round_page_slice_size` | `ROUND_PAGE_SLICE_SIZE` | Pages attempted per active user per round |
+| `resource_concurrency` | `RESOURCE_CONCURRENCY` | Concurrent resource children per user |
+| `files_page_window_size` | `FILES_PAGE_WINDOW_SIZE` | Concurrent page children per resource |
+| `files_per_page_concurrency` | `FILES_PER_PAGE_CONCURRENCY` | Per-page ceiling for document children |
+| `document_ingestion_concurrency` | `DOCUMENT_INGESTION_CONCURRENCY` | Second per-page document ceiling; the lower ceiling is used |
+| `provider_page_size` | 100 | Requested resource-page size |
+| `activation_recent_page_cap` | 5 | Recent pages attempted before activation backfill |
 
-Every other combination fails worker startup.
+The client supplies `provider_task_queue` and the capability-gated `priority_fairness_enabled`
+value. Callers should not override them unless they intentionally operate a compatible queue and
+server configuration. All integer policy values must be positive. If either `provider` or
+`credential_key` is absent, the sync performs provider calls without the shared quota coordinator.
 
-## Stable identities and Task Queues
+## Stable IDs and Task Queues
 
-`RetrievalClient` uses Temporal Update-with-Start so the first command can atomically create the
-store controller. Business IDs use hashed opaque components; a Temporal Run ID is never used as a
-business identifier.
+Business-derived ID components are hashed with the centralized SHA-256/base32 helper in
+`common/ids.py`. Temporal Run ID is never used as business identity.
 
 | Concern | Convention |
 |---|---|
-| Store controller | `store-controller/{opaque-store}` |
+| Controller | `store-controller/{opaque-store}` |
 | Root sync | `store-sync/{opaque-store}/{generation}/{opaque-sequence}` |
-| Remediation | `failed-user-remediation/{opaque-store}/{generation}/{opaque-partition}` |
+| Remediation | `failed-user-remediation/{opaque-store}/{generation}/{opaque-sequence-or-partition}` |
+| User/resource/page/document children | Stable opaque IDs derived from their logical inputs |
 | Deactivation | `store-deactivation/{opaque-store}/{generation}` |
 | Shared quota | `user-quota/{opaque-provider-credential-class}` |
-| Retrieval queue | `retrieval-v2` by default |
-| Provider queue | `retrieval-provider-v2` by default |
+| Retrieval Task Queue | `TEMPORAL_RETRIEVAL_TASK_QUEUE`, default `retrieval-v2` |
+| Provider Task Queue | `TEMPORAL_PROVIDER_TASK_QUEUE`, default `retrieval-provider-v2` |
 
-A `command_id` deduplicates one logical command. A `sync_sequence` identifies one logical sync.
-The quota `credential_key` is an opaque account identifier, never a credential value.
+Detached sync, remediation, and deactivation starts use stable IDs and await the server's start
+acknowledgement. The controller owns their durable registrations. Joined child workflows use
+bounded concurrency and explicit cancellation behavior.
 
-## Configuration reference
+## Runtime configuration
 
-### Environment-file behavior
+Connection, deployment, and adapter settings come from `TemporalRuntimeConfig`:
 
-Supported executables inspect only `.env` in the current working directory. They never search
-parent directories and importing a module never loads a file.
-
-- `RETRIEVAL_ENV_FILE=<path>` selects an explicit file.
-- `RETRIEVAL_ENV_FILE=` disables file loading.
-- Process/container/platform variables win over file values, including an intentionally empty
-  process value.
-- `${NAME}` text remains literal; environment interpolation is disabled.
-- A missing default `.env` is allowed. A missing explicit file is an error.
-
-Environment files can select Python factories and can contain credentials. Treat them as trusted
-configuration, keep them out of images/source control, and use mode `0600` when they contain
-secrets.
-
-### Temporal and worker variables
-
-| Variable | Default | Meaning |
+| Environment variable | Default | Meaning |
 |---|---|---|
 | `TEMPORAL_ADDRESS` | `localhost:7233` | Temporal frontend address |
-| `TEMPORAL_NAMESPACE` | `default` | Temporal namespace |
-| `TEMPORAL_API_KEY` | unset | Temporal Cloud credential |
-| `TEMPORAL_TLS` | true with an API key; otherwise false | TLS mode |
-| `TEMPORAL_RETRIEVAL_TASK_QUEUE` | `retrieval-v2` | Workflow and persistence queue |
+| `TEMPORAL_NAMESPACE` | `default` | Namespace for all workflows, including quota coordinators |
+| `TEMPORAL_API_KEY` | unset | Temporal Cloud/API credential |
+| `TEMPORAL_TLS` | true when API key is set | Enable TLS |
+| `TEMPORAL_RETRIEVAL_TASK_QUEUE` | `retrieval-v2` | Workflow and persistence Activity queue |
 | `TEMPORAL_PROVIDER_TASK_QUEUE` | `retrieval-provider-v2` | Provider Activity queue |
 | `TEMPORAL_DEPLOYMENT_NAME` | `retrieval-v2` | Worker Deployment name |
-| `TEMPORAL_BUILD_ID` | `local` | Immutable worker build identity |
-| `TEMPORAL_USE_WORKER_VERSIONING` | `false` | Use deployment-based version routing |
-| `TEMPORAL_REGISTER_LEGACY_DRAIN_TYPES` | `false` | Register optional drain-only names |
-| `TEMPORAL_SERVER_PRIORITY_FAIRNESS_SUPPORTED` | `false` | Assert server support for priority/fairness |
-| `TEMPORAL_ENABLE_SEARCH_ATTRIBUTES` | `false` | Attach registered typed Search Attributes |
-| `RETRIEVAL_ADAPTER_BUNDLE_FACTORY` | unset | Typed bundle factory |
-| `RETRIEVAL_REPOSITORY_FACTORY` | unset | Individual repository factory |
-| `RETRIEVAL_STAGING_STORE_FACTORY` | unset | Individual staging factory |
-| `RETRIEVAL_PROVIDER_GATEWAY_FACTORY` | unset | Individual provider factory |
-| `RETRIEVAL_ALLOW_UNSAFE_IN_MEMORY_ADAPTERS` | `false` | Explicit local-only fallback |
+| `TEMPORAL_BUILD_ID` | `local` | Immutable build identifier |
+| `TEMPORAL_USE_WORKER_VERSIONING` | `false` | Enable pinned deployment-based Worker Versioning |
+| `TEMPORAL_REGISTER_LEGACY_DRAIN_TYPES` | `false` | Register optional drain-only workflow names |
+| `TEMPORAL_SERVER_PRIORITY_FAIRNESS_SUPPORTED` | `false` | Assert server support for Priority/Fairness |
+| `TEMPORAL_ENABLE_SEARCH_ATTRIBUTES` | `false` | Attach the project's typed Search Attributes |
+| `RETRIEVAL_ALLOW_UNSAFE_IN_MEMORY_ADAPTERS` | `false` | Permit local non-durable adapters |
+| `RETRIEVAL_REPOSITORY_FACTORY` | unset | `module:function` repository factory |
+| `RETRIEVAL_STAGING_STORE_FACTORY` | unset | `module:function` staging-store factory |
+| `RETRIEVAL_PROVIDER_GATEWAY_FACTORY` | unset | `module:function` provider factory |
 
-`TEMPORAL_WORKER_DEPLOYMENT_NAME` and `TEMPORAL_WORKER_BUILD_ID` are fallback names for platforms
-that inject Worker Controller conventions. The primary names above take precedence.
+Workflow tuning comes from `RetrievalTemporalConfig`:
 
-### Google Drive variables
-
-These variables apply when `RETRIEVAL_ADAPTER_BUNDLE_FACTORY` is
-`retrieval.google_drive.bundle:create_adapter_bundle`.
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `GOOGLE_DRIVE_CREDENTIAL_KEY` | required | Opaque shared-quota identity; never a credential value |
-| `GOOGLE_DRIVE_USER_KEY` | credential key | Stable opaque provider user identity |
-| `GOOGLE_DRIVE_STAGING_DIRECTORY` | required | Absolute shared path for staged content and sync checkpoints |
-| `GOOGLE_DRIVE_ROOT_FOLDER_ID` | unset | Optional folder subtree; unset lists every visible Drive file |
-| `GOOGLE_DRIVE_CREDENTIALS_FILE` | ADC | Optional absolute service-account JSON secret path |
-| `GOOGLE_DRIVE_SUBJECT` | unset | Optional delegated Workspace user for domain-wide delegation |
-| `GOOGLE_DRIVE_MAX_FILE_BYTES` | `10485760` | Maximum downloaded source body size |
-| `GOOGLE_DRIVE_REQUEST_TIMEOUT` | `60` | Drive HTTP request timeout in seconds |
-
-See the [Google Drive integration guide](docs/google-drive-integration.md) before selecting a
-staging volume or authentication mode.
-
-### Workflow limits
-
-| Variable | Default | Meaning |
+| Environment variable | Default | Meaning |
 |---|---:|---|
-| `STORE_SYNC_MAX_ACTIVE_USERS` | 20 | Concurrent user children in ordinary mode |
-| `STORE_SYNC_USER_PAGE_SIZE` | 100 | Provider users requested per page |
-| `ROUND_USER_WINDOW_SIZE` | 20 | Users admitted per round |
-| `ROUND_PAGE_SLICE_SIZE` | 5 | Pages attempted per user/round |
-| `RESOURCE_CONCURRENCY` | 8 | Concurrent resources per user |
-| `FILES_PAGE_WINDOW_SIZE` | 5 | Concurrent page children |
-| `FILES_PER_PAGE_CONCURRENCY` | 10 | Per-page document ceiling |
-| `DOCUMENT_INGESTION_CONCURRENCY` | 20 | Second document ceiling; lower ceiling wins |
-| `OBJECT_CLEANUP_BATCH_SIZE` | 250 | Documents deleted by one cleanup Activity |
-| `USER_QUOTA_MAX_IN_FLIGHT` | 4 | Reserved/active provider permits per scope |
-| `USER_QUOTA_MAX_PENDING_REQUESTS` | 350 | Maximum queued permit requests |
-| `USER_QUOTA_DEDUP_WINDOW_SIZE` | 2,000 | Retained terminal permit IDs |
-| `USER_QUOTA_CONTINUE_AS_NEW_MESSAGE_COUNT` | 10,000 | Coordinator rollover threshold |
-| `DEACTIVATION_DRAIN_TIMEOUT` | `5m` | Wait for controller-owned work |
-| `TEMPORAL_ENABLE_PRIORITY_FAIRNESS` | `false` | Emit SDK scheduling metadata when supported |
-| `TEMPORAL_PROVIDER_QUEUE_RPS` | unset | Worker-side provider Activity rate limit |
-| `TEMPORAL_FAIRNESS_KEY_RPS_DEFAULT` | unset | Documented server target; not SDK-enforced |
+| `STORE_SYNC_MAX_ACTIVE_USERS` | 20 | Ordinary-mode user child concurrency |
+| `STORE_SYNC_USER_PAGE_SIZE` | 100 | Users requested per provider page |
+| `ROUND_USER_WINDOW_SIZE` | 20 | Active users per round-mode window |
+| `ROUND_PAGE_SLICE_SIZE` | 5 | Pages attempted per active user and round |
+| `RESOURCE_CONCURRENCY` | 8 | Resources processed concurrently per user |
+| `FILES_PAGE_WINDOW_SIZE` | 5 | Page children admitted concurrently |
+| `FILES_PER_PAGE_CONCURRENCY` | 10 | Per-page document concurrency ceiling |
+| `DOCUMENT_INGESTION_CONCURRENCY` | 20 | Second per-page document ceiling; the lower value is used |
+| `USER_QUOTA_MAX_IN_FLIGHT` | 4 | Provider permits concurrently reserved per scope |
+| `USER_QUOTA_MAX_PENDING_REQUESTS` | 350 | Pending permit ceiling; cannot exceed 350 |
+| `USER_QUOTA_DEDUP_WINDOW_SIZE` | 2,000 | Recent terminal permit IDs retained |
+| `USER_QUOTA_CONTINUE_AS_NEW_MESSAGE_COUNT` | 10,000 | Message-count rollover threshold |
+| `DEACTIVATION_DRAIN_TIMEOUT` | `5m` | Maximum wait for owned operation drain |
+| `TEMPORAL_ENABLE_PRIORITY_FAIRNESS` | `false` | Enable SDK scheduling metadata when server support is also asserted |
+| `TEMPORAL_PROVIDER_QUEUE_RPS` | unset | Worker-side provider Task Queue Activity rate limit |
+| `TEMPORAL_FAIRNESS_KEY_RPS_DEFAULT` | unset | Documented server-side per-key target; logged but not enforced by the SDK |
 
-Durations accept seconds or `ms`, `s`, `m`, and `h` suffixes. Invalid booleans, non-positive
-limits, and unsafe quota relationships fail before startup.
+Invalid booleans, non-positive limits, unsafe quota relationships, and invalid durations fail
+configuration loading.
 
-### Lakebase/Postgres variables
+## Search Attributes
 
-Canonical `PG*` variables take precedence over `LAKEBASE_*` aliases.
+When the namespace attributes are registered and `TEMPORAL_ENABLE_SEARCH_ATTRIBUTES=true`, starts
+can include `StoreKeyHash`, `LifecycleGeneration`, `OperationType`, `CurrentPhase`, `SyncSequence`,
+`Provider`, `QuotaScopeHash`, and `WorkClass` where applicable. Values derived from a store,
+credential, or quota scope are opaque. `ResultStatus` is part of the intended schema but terminal
+status and phase upserts are not yet implemented; see the production-readiness guide.
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `PGHOST` / `LAKEBASE_HOST` | required | Database host |
-| `PGPORT` / `LAKEBASE_PORT` | `5432` | Database port |
-| `PGDATABASE` / `LAKEBASE_DATABASE` | required | Database name |
-| `PGUSER` / `LAKEBASE_USER` | required | Database role |
-| `PGSSLMODE` / `LAKEBASE_SSLMODE` | `require` | `require`, `verify-ca`, or `verify-full` |
-| `LAKEBASE_ENDPOINT` | required for OAuth | Full Lakebase endpoint resource name |
-| `PGPASSWORD` / `LAKEBASE_PASSWORD` | local alternative | Static password; mutually exclusive with endpoint OAuth |
-| `LAKEBASE_POOL_MIN_SIZE` | `1` | Minimum pool size |
-| `LAKEBASE_POOL_MAX_SIZE` | 10 App, 20 demo worker, 2 migration | Maximum pool size |
-| `LAKEBASE_POOL_ACQUIRE_TIMEOUT_SECONDS` | `10` | Pool checkout timeout |
-| `LAKEBASE_POOL_OPEN_TIMEOUT_SECONDS` | `30` | Initial pool readiness timeout |
-| `LAKEBASE_POOL_MAX_IDLE_SECONDS` | `600` | Idle connection lifetime |
-| `LAKEBASE_POOL_MAX_LIFETIME_SECONDS` | `3300` | Maximum connection lifetime |
-| `LAKEBASE_POOL_RECONNECT_TIMEOUT_SECONDS` | `30` | Background reconnect timeout |
-| `LAKEBASE_CONNECT_TIMEOUT_SECONDS` | `10` | Per-connection timeout |
-| `LAKEBASE_STATEMENT_TIMEOUT_SECONDS` | `30` | Postgres statement timeout |
-| `LAKEBASE_LOCK_TIMEOUT_SECONDS` | `5` | Postgres lock timeout |
-| `LAKEBASE_HEALTH_CHECK_TIMEOUT_SECONDS` | `5` | Readiness-check timeout |
-| `LAKEBASE_TRANSACTION_RETRY_LIMIT` | `3` | Retryable transaction attempts |
-| `LAKEBASE_APPLICATION_NAME` | `temporal-retrieval-v2` | Postgres connection label |
-| `RETRIEVAL_SEARCH_BACKEND` | `postgres_text` | Supported search implementation |
+## Core correctness invariants
 
-The Lakebase pool obtains a fresh Databricks OAuth database token for each new physical
-connection. `lakebase_hybrid` is reserved but not implemented; selecting it fails explicitly.
+- Workflow code is deterministic; side effects and wall-clock interaction belong in Activities.
+- Every persistent mutation is generation-fenced atomically with its write.
+- Deactivation commits the new generation before cancellation or cleanup.
+- Fan-out is finite, joined, and drained before Continue-As-New.
+- A failed page checkpoints the earliest failed page's input cursor; later work may be replayed but
+  is idempotent.
+- Root progress carried through Continue-As-New uses cumulative counts and bounded samples.
+- A new sync cannot start while remediation remains active for the store.
+- Quota callers receive an exact grant or denial and never consume an Activity slot while waiting.
+- Workflow history contains document references, not document bodies.
+- Metrics exclude raw store, user, credential, request, and cursor identifiers.
 
-### Northstar App variables
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `RETRIEVAL_DEMO_MODE` | `false` | Enable demo adapters and endpoints |
-| `RETRIEVAL_DEMO_SCENARIO` | `northstar-v1` | Packaged scenario ID |
-| `RETRIEVAL_DEMO_HOLD_TIMEOUT_SECONDS` | `30` | Maximum pre-commit hold |
-| `RETRIEVAL_DEMO_CONTROL_POLL_SECONDS` | `0.25` | Cross-process control poll interval |
-| `RETRIEVAL_DEMO_STORE_KEY_PREFIX` | `northstar` | Required seed-function prefix |
-| `DATABRICKS_APP_PORT` | `8000` locally | App port; host is always `0.0.0.0` |
-| `TEMPORAL_WEB_BASE_URL` | unset | Optional Temporal Web base URL/template |
-
-Every App `POST` request also needs an `Idempotency-Key` header. The database stores only its hash,
-the request hash, the durable response, and operation identity.
-
-## Database objects and ownership
-
-Core migrations create the `retrieval` schema:
-
-- `stores`: lifecycle state and current generation;
-- `store_users` and `retrieval_state`: synchronized per-store state;
-- `documents` and `document_chunks`: current searchable content;
-- `write_receipts`: Activity idempotency records;
-- `schema_migrations`: migration names, versions, and checksums.
-
-Demo migrations create `retrieval_demo_ui`:
-
-- `demo_runs`, `demo_controls`, `demo_events`, and `demo_operations`;
-- `api_idempotency` for durable HTTP request receipts;
-- `schema_migrations` for the demo schema;
-- `create_northstar_run(...)`, a fixed-purpose `SECURITY DEFINER` function.
-
-The migration identity owns both schemas. The App gets core reads and limited demo writes; the
-worker gets core mutations and limited demo control/event access. Exact grants are in
-`src/retrieval/lakebase/grants.py` and the [migration runbook](docs/runbooks/migration-and-rollback.md).
-
-## Non-negotiable invariants
-
-- Every retrieval mutation validates lifecycle state and generation in its database transaction.
-- Deactivation commits the new generation before cancellation and cleanup.
-- Same idempotency key plus the same canonical payload is a duplicate success only while its
-  generation remains current and writable; conflicting reuse fails.
-- After a fence, stale generation wins over any historical receipt.
-- Search returns only current-generation content from readable lifecycle states.
-- Cleanup uses bounded batches and cannot mark a store inactive until owned rows are zero.
-- Workflow history contains document references, never bodies or chunks.
-- Provider waits are durable and consume no Activity worker slot.
-- Credentials, document bodies, and raw idempotency keys are excluded from metrics and demo events.
-
-For execution diagrams, read [workflow topology](docs/workflow-topology.md). For the rationale
-behind these boundaries, read [ADR 0001](docs/adr/0001-workflow-boundaries.md).
+The diagrams in [`docs/workflow-topology.md`](docs/workflow-topology.md) show where each invariant
+is enforced.

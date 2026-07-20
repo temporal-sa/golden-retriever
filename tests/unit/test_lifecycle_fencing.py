@@ -6,7 +6,6 @@ import hashlib
 import pytest
 
 from retrieval.temporal.activities import ingestion as ingestion_module
-from retrieval.temporal.activities.hooks import IngestionEvent
 from retrieval.temporal.activities.ingestion import IngestionActivities
 from retrieval.temporal.activities.repositories import (
     InMemoryRetrievalRepository,
@@ -16,14 +15,6 @@ from retrieval.temporal.activities.repositories import (
 from retrieval.temporal.models.documents import DocumentIngestionInput, DocumentRef
 from retrieval.temporal.models.lifecycle import StoreLifecycleState
 from retrieval.temporal.models.operations import ResultStatus
-
-
-class RecordingEventSink:
-    def __init__(self) -> None:
-        self.events: list[IngestionEvent] = []
-
-    async def record(self, event: IngestionEvent) -> None:
-        self.events.append(event)
 
 
 def document_input(store_key: str, generation: int, body: bytes) -> DocumentIngestionInput:
@@ -52,7 +43,7 @@ async def test_old_generation_document_write_is_rejected_after_fence() -> None:
     result = await activities.ingest_staged_document(document_input("store", 7, body))
 
     assert result.status is ResultStatus.STALE_GENERATION
-    assert (await repository.get_store("store")).document_count == 0
+    assert (await repository.get_store("store")).documents == {}
 
 
 @pytest.mark.asyncio
@@ -70,37 +61,7 @@ async def test_late_ingestion_cannot_recreate_objects_removed_by_deactivation() 
     late_result = await activities.ingest_staged_document(command)
 
     assert late_result.status is ResultStatus.STALE_GENERATION
-    assert (await repository.get_store("store")).document_count == 0
-
-
-@pytest.mark.asyncio
-async def test_ingestion_commits_searchable_chunks_and_redacted_events() -> None:
-    body = (
-        b"---\ntitle: Northstar renewal\nsource_uri: https://example.invalid/renewal\n---\n"
-        b"Renewal timing and account priorities."
-    )
-    repository = InMemoryRetrievalRepository()
-    await repository.ensure_store("store", generation=7)
-    sink = RecordingEventSink()
-    activities = IngestionActivities(
-        repository,
-        InMemoryStagingStore({"stage://document": body}),
-        event_sink=sink,
-    )
-
-    first = await activities.ingest_staged_document(document_input("store", 7, body))
-    duplicate = await activities.ingest_staged_document(document_input("store", 7, body))
-    stored = await repository.inspect_store("store")
-
-    assert first.status is duplicate.status is ResultStatus.SUCCEEDED
-    assert duplicate.metadata["duplicate"] == "true"
-    assert stored.documents["document"].title == "Northstar renewal"
-    assert stored.documents["document"].chunks[0].text == "Renewal timing and account priorities."
-    assert [event.event_type for event in sink.events] == [
-        "document_committed",
-        "document_committed",
-    ]
-    assert all(event.idempotency_key_hash != "ingest/document/version-1" for event in sink.events)
+    assert (await repository.get_store("store")).documents == {}
 
 
 @pytest.mark.asyncio

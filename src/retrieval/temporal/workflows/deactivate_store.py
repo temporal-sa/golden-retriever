@@ -56,7 +56,6 @@ _ACTIVITY_RETRY_POLICY = RetryPolicy(
     non_retryable_error_types=[
         "StaleLifecycleGenerationError",
         "LifecycleStateRejectedError",
-        "CleanupIncompleteError",
     ],
 )
 _CHILD_RETRY_POLICY = RetryPolicy(
@@ -454,7 +453,6 @@ class DeactivateStoreWorkflow:
         cleanup_input = CleanupWorkflowInput(
             store_key=command.store_key,
             lifecycle_generation=generation.lifecycle_generation,
-            object_batch_size=command.object_cleanup_batch_size,
         )
         workflow_id = "cleanup-users/" + opaque_key(
             command.store_key,
@@ -473,7 +471,6 @@ class DeactivateStoreWorkflow:
         cleanup_input = CleanupWorkflowInput(
             store_key=command.store_key,
             lifecycle_generation=generation.lifecycle_generation,
-            object_batch_size=command.object_cleanup_batch_size,
         )
         workflow_id = "remove-objects/" + opaque_key(
             command.store_key,

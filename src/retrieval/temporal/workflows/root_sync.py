@@ -13,7 +13,6 @@ with workflow.unsafe.imports_passed_through():
         ListActiveUsersRequest,
         UserDescriptor,
     )
-    from retrieval.temporal.activities.search_index import RefreshSearchIndexInput
     from retrieval.temporal.common.ids import (
         failed_user_remediation_workflow_id,
         permit_request_id,
@@ -41,10 +40,7 @@ with workflow.unsafe.imports_passed_through():
         UserCursor,
         UserSyncInput,
     )
-    from retrieval.temporal.workflows._policies import (
-        provider_activity_options,
-        search_index_activity_options,
-    )
+    from retrieval.temporal.workflows._policies import provider_activity_options
 
 
 _FAILED_USER_SAMPLE_LIMIT = 100
@@ -834,21 +830,6 @@ class RootSyncWorkflow(QuotaWaiterMixin):
                 result, _failed_sample = await self._round_mode(command)
             else:
                 result, _failed_sample = await self._ordinary(command)
-            if (
-                command.refresh_search_index
-                and result.status is ResultStatus.SUCCEEDED
-                and workflow.patched("lakebase-hybrid-index-refresh-v1")
-            ):
-                self._phase = "refreshing-search-index"
-                await workflow.execute_activity(
-                    "refresh_search_index",
-                    RefreshSearchIndexInput(
-                        store_key=command.store_key,
-                        lifecycle_generation=command.lifecycle_generation,
-                        sync_sequence=command.sync_sequence,
-                    ),
-                    **search_index_activity_options(),
-                )
             await self._report_sync_terminal(
                 command,
                 OperationStatus.COMPLETED,

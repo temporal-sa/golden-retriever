@@ -7,7 +7,6 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import Priority, RetryPolicy
-from temporalio.workflow import ActivityCancellationType
 
 from retrieval.temporal.common.priorities import (
     activity_priority_kwargs,
@@ -59,11 +58,7 @@ def ingestion_activity_options() -> dict[str, Any]:
     return {
         "start_to_close_timeout": timedelta(minutes=15),
         "schedule_to_close_timeout": timedelta(minutes=30),
-        # Demo holds are capped at 30 seconds. Keep a margin so a cancellation
-        # delivered at the boundary cannot race an Activity heartbeat timeout
-        # and start an unnecessary retry before the bounded hold resolves.
-        "heartbeat_timeout": timedelta(seconds=45),
-        "cancellation_type": ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+        "heartbeat_timeout": timedelta(seconds=30),
         "retry_policy": RetryPolicy(
             initial_interval=timedelta(seconds=2),
             backoff_coefficient=2.0,
@@ -72,26 +67,6 @@ def ingestion_activity_options() -> dict[str, Any]:
             non_retryable_error_types=[
                 "InvalidDocumentPayload",
                 "StaleLifecycleGenerationError",
-                "DemoHoldTimeoutError",
-            ],
-        ),
-    }
-
-
-def search_index_activity_options() -> dict[str, Any]:
-    return {
-        "start_to_close_timeout": timedelta(minutes=5),
-        "schedule_to_close_timeout": timedelta(minutes=8),
-        "heartbeat_timeout": timedelta(seconds=30),
-        "cancellation_type": ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-        "retry_policy": RetryPolicy(
-            initial_interval=timedelta(seconds=2),
-            backoff_coefficient=2.0,
-            maximum_interval=timedelta(seconds=30),
-            maximum_attempts=3,
-            non_retryable_error_types=[
-                "StaleLifecycleGenerationError",
-                "LifecycleStateRejectedError",
             ],
         ),
     }

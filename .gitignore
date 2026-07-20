@@ -1,5 +1,4 @@
 .venv/
-.databricks/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -9,9 +8,6 @@ htmlcov/
 dist/
 build/
 *.egg-info/
-.env*
-*.env
-!.env.example
+.env
 artifacts/histories/*.json
 !artifacts/histories/root-sync-replay-smoke.json
-!artifacts/histories/remove-objects-pre-batch.json
