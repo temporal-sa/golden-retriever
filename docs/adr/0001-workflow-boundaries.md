@@ -1,106 +1,105 @@
-# ADR 0001: Retrieval workflow boundaries
+# ADR 0001: Separate workflow boundaries by ownership and scale
 
 - Status: accepted
-- Date: 2026-07-18
+- Decision date: 2026-07-18
+
+An architecture decision record (ADR) explains a durable design choice, the alternatives that were
+considered, and the conditions that would justify revisiting it. This ADR concerns how retrieval
+work is divided among Temporal Workflow Types.
 
 ## Context
 
-Retrieval must coordinate several kinds of durable state at different scales: one store lifecycle,
-many users and resources, paginated provider data, individual document mutations, shared external
-quotas, failed-user remediation, and store cleanup. A single workflow would accumulate excessive
-history and mix lifecycle ownership with high-volume fan-out. Using Activities for coordination
-would make waits, cancellation, and ownership dependent on worker processes.
+One store sync can involve many users, resources, provider pages, and documents. The system must
+also coordinate shared provider quota, retry failed users, deactivate a store, and clean its data.
+These concerns operate at different scales and lifetimes.
 
-The design also has three correctness constraints:
+The design must satisfy three constraints:
 
-1. provider response bodies must not inflate Workflow Event History; and
-2. at-least-once Activity delivery must not create duplicate database effects; and
-3. deactivation must prevent late, retried Activities from mutating an inactive store.
+1. provider response bodies must not inflate Temporal Workflow Event History;
+2. at-least-once Activity execution must not duplicate database effects; and
+3. deactivation must reject late generation writes even when cancellation loses a race.
+
+A **joined child** must complete before its parent. A **detached operation** has a stable Workflow
+ID, is durably started, and reports status to the store controller without making the controller
+wait for the entire high-volume history.
 
 ## Decision
 
-Keep store control, root sync, user, resource, page window, file page, document ingestion,
-remediation, activation, quota, and cleanup as distinct Workflow Types.
+Use distinct Workflow Types for store control, root sync, user/resource/page/document fan-out,
+failed-user remediation, user activation, shared quota, deactivation, and cleanup.
 
-The long-lived `StoreControllerWorkflow` owns low-volume lifecycle decisions. It serializes
-idempotent commands, starts sync and deactivation operations with stable IDs, and tracks their
-durable status. It does not perform retrieval fan-out.
+The long-lived `StoreControllerWorkflow` is the command and lifecycle authority for one store. It
+serializes idempotent sync/cancel/deactivation commands, starts stable detached operations, and
+tracks their status. It does not perform retrieval fan-out.
 
-Root sync, failed-user remediation, and store deactivation are detached from the controller after
-Temporal acknowledges their stable start. They report status through idempotent Signals. Joined
-children own bounded concurrency, retry state, cursor checkpoints, or a deliberate history
-partition.
+Root sync, failed-user remediation, and deactivation are detached after Temporal acknowledges their
+stable start. Their bounded descendants are joined, so each parent owns its failures,
+concurrency, cursor/checkpoint, and completion.
 
 Use one `UserQuotaWorkflow` per provider, opaque credential key, and quota class. A short Activity
-performs Signal-with-Start, then the caller waits durably on a workflow condition. Provider
-Priority/Fairness metadata applies only after quota admission.
+performs Signal-with-Start; callers then wait durably without occupying Activity capacity.
 
-Store deactivation always follows `fence → cancel → drain → bounded cleanup`. Every mutating
-Activity compares the expected lifecycle generation and allowed state in the same Lakebase
-transaction as its write. Document metadata, chunks, and an idempotency receipt commit together.
-Cancellation reduces wasted work; the generation fence provides safety.
+Deactivation always uses `fence → cancel → drain → bounded cleanup`. Every mutating Activity
+compares the expected generation and lifecycle state inside the same Lakebase transaction as its
+write. Cancellation reduces work; the database generation fence provides safety.
 
-Workflow inputs and results carry compact `DocumentRef` metadata. Document bodies remain in a
-staging or object store and are loaded, verified, parsed, and chunked by the ingestion Activity.
-Searchable chunks never become workflow payloads.
+Workflow messages carry compact `DocumentRef` values. The ingestion Activity loads, verifies,
+parses, and chunks the body from staging. Bodies and chunks never become workflow payloads.
 
-## Rationale
+## Why this design was selected
 
-- The controller gives each store one durable command and lifecycle authority.
-- Detached operations can outlive a controller run while remaining discoverable by stable ID.
-- Joined child boundaries keep failure propagation and concurrency ownership explicit.
-- Page and root Continue-As-New boundaries keep Event History bounded.
-- Shared quota state survives caller and worker restarts without occupying Activity slots.
-- Staged document bodies bound payload size and replay cost.
-- Atomic generation checks and durable receipts make at-least-once Activity delivery safe across
-  retries and deactivation.
+- The controller gives each store one durable command authority.
+- Detached operations can survive controller Continue-As-New while remaining discoverable by
+  stable ID.
+- Joined children make concurrency ownership and failure propagation explicit.
+- Root/page/cleanup boundaries keep Event History bounded.
+- Shared quota state survives worker/caller restarts and coordinates real provider capacity.
+- Staged bodies bound payload size, sensitivity, and replay cost.
+- Atomic generation checks plus durable receipts make Activity retries safe.
 
 ## Alternatives considered
 
-### One workflow per store for all retrieval work
+### Put all store work in one Workflow
 
-Rejected because high-volume child work, signals, and provider waits would share one long-lived
-history with lifecycle commands. Continue-As-New would also have to carry much more mutable state.
+Rejected because lifecycle commands, fan-out, provider waits, and high-volume child events would
+share one long-lived history. Continue-As-New would also have to carry a much larger mutable state.
 
-### Request-scoped quota wait workflows
+### Create one quota-wait Workflow per request
 
-Rejected for the primary path because they fragment one real provider quota across many workflow
-instances and require extra coordination to enforce a shared limit.
+Rejected because many request-scoped workflows would fragment one real provider limit and require
+another coordination layer to enforce shared capacity.
 
-### Waiting or sleeping inside Activities
+### Sleep or wait inside Activities
 
-Rejected because it consumes Activity capacity and makes durable admission state harder to
-inspect, cancel, deduplicate, and recover.
+Rejected because waiting would consume worker capacity and make admission state harder to inspect,
+deduplicate, cancel, and recover.
 
-### Cancellation as the deactivation safety boundary
+### Rely on cancellation to protect deactivation
 
-Rejected because Activity completion and retry can race with cancellation. A committed generation
-fence is authoritative even when cancellation is delayed or ignored.
+Rejected because an Activity may complete or retry after cancellation is requested. Only an atomic
+database generation check can reject that late mutation.
 
 ### Put document bodies in workflow payloads
 
-Rejected because provider pages and histories would become large, expensive to replay, and more
-likely to contain sensitive content.
+Rejected because histories would become large, costly to replay, and more likely to contain
+sensitive content.
 
 ## Consequences
 
-- The worker registers more Workflow Types, and compatible implementations must remain available
-  for any open histories that reference them.
-- Detached work requires stable IDs, explicit controller registration, idempotent status Signals,
-  and operational visibility.
-- Quota acquisition adds a short client Activity and Signals, but blocked requests use no Activity
-  worker slot.
+- The worker registers more Workflow Types and must preserve compatible implementations for open
+  histories.
+- Detached operations require stable IDs, controller registration, idempotent status Signals, and
+  operational visibility.
+- Quota admission adds a bridge Activity and Signals, while durable waiting uses no Activity slot.
 - Production adapters must implement atomic generation compare-and-write and idempotent mutations.
-- Lakebase and demo schemas are owned and migrated outside Workflow execution; runtime identities
-  receive explicit object grants. The Databricks App resource additionally confers managed
-  database-level `CONNECT`/`CREATE`, which requires a dedicated database or a verified post-binding
-  revocation where policy demands it.
-- Workflow upgrades require representative history replay and compatible Worker Versioning
-  routing.
+- Database migrations/ownership stay outside workflows; App and worker identities receive explicit
+  grants.
+- Workflow upgrades require representative replay and compatible Worker Versioning routing.
 
-## Reconsider this decision when
+## Revisit this decision when
 
-- measured history and scheduling behavior shows a boundary is unnecessary or too coarse;
-- Temporal introduces a simpler durable shared-admission primitive with equivalent semantics;
-- provider APIs expose a different quota model that cannot be represented by the current scope;
-- the persistence model can no longer provide atomic generation-fenced mutations.
+- measurements show a boundary creates more scheduling/history cost than it saves;
+- Temporal offers a simpler shared-admission primitive with equivalent durability;
+- a provider quota model cannot be represented by the current scope;
+- the target database cannot provide atomic generation-fenced transactions;
+- real workload evidence supports a different fan-out or Continue-As-New boundary.

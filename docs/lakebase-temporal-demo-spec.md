@@ -1,402 +1,278 @@
-# Lakebase + Temporal Northstar demo: as-built reference
+# System specification: durable retrieval with Temporal and Lakebase
 
-- Status: implemented and packaged; target deployment not performed
-- Audience: new contributors, demo operators, Temporal and Databricks reviewers
-- Scenario: `northstar-v1`
-- Last updated: 2026-07-18
+This document defines the behavior of the system and its packaged Northstar demonstration. It is
+written for readers who have not seen the code. For setup commands, start with the root
+[README](../README.md). For diagrams, use [workflow topology](workflow-topology.md).
 
-## Purpose
+## The problem being solved
 
-This repository demonstrates one clear division of responsibility:
+A retrieval service must copy data from an external provider into a searchable database. Real
+syncs are not single requests: they paginate through users and resources, wait for provider quota,
+retry failed calls, and may still be writing when an operator deactivates the data set.
 
-> Temporal remembers what must happen across time and failure. Lakebase decides what is currently
-> true at the mutation boundary and makes that truth retrievable.
+Two failure modes shape this design:
 
-Temporal owns workflow history, retries, bounded fan-out, shared provider quota waits,
-cancellation, draining, and cleanup order. Lakebase owns store lifecycle state and generation,
-documents, chunks, write receipts, demo controls, and the transaction that accepts or rejects a
-late write. The design assumes Temporal Activities are at least once; it does not claim exactly-once
-execution.
+1. Temporal Activities are at least once, so the same database mutation may be attempted more than
+   once.
+2. Cancellation is cooperative, so an Activity that was scheduled before deactivation can finish
+   after deactivation starts.
 
-The deployable demo artifacts are present: database migrations, worker code and container, FastAPI
-App, static UI, root App manifest, and Databricks bundle. No target Lakebase database, Databricks
-App, or Temporal worker has been created or deployed from this repository. A future operator must
-still validate identity, grants, networking, migrations, and readiness in the chosen environment.
+The system therefore separates coordination from authoritative data safety:
 
-## Northstar story
+> Temporal remembers what must happen across time and failure. Lakebase decides whether a mutation
+> is still valid and stores the searchable truth.
 
-A new run creates a unique internal store such as `northstar-7f3a9c` while the UI displays
-**Northstar AI**. The store starts `active` at lifecycle generation 7.
+## Components
 
-| Fixture | Account fact | Runtime behavior |
-|---|---|---|
-| `northstar-qbr.md` | EU residency and SCIM expansion requirements | Normal commit |
-| `renewal-plan.md` | Renewal date is September 30 | Normal commit |
-| `support-escalation.md` | P1 ingestion-latency target is August 15 | Normal commit |
-| `stakeholders.md` | Aisha, VP Engineering, is the champion | Normal commit |
-| `late-security-review.md` | Security review is a renewal dependency | Held after parse/chunk, before transaction |
+| Component | Responsibility |
+|---|---|
+| Browser | Presents the demo and polls asynchronous operations |
+| FastAPI App | Validates HTTP requests, submits Temporal commands, reads Lakebase state/search |
+| Temporal namespace | Stores Workflow Event History, timers, retries, Signals, and operation state |
+| `retrieval-worker` | Executes workflows and Activities from two Task Queues |
+| Lakebase Postgres | Stores lifecycle, generations, documents, chunks, receipts, controls, and events |
+| Provider/staging adapters | List provider objects and load document bodies outside workflow history |
 
-The scripted provider atomically injects one quota-exhausted response on `list_active_users` with a
-five-second retry. Temporal records the reset, waits durably, and retries without losing the
-provider cursor. Four documents commit at generation 7. The fifth Activity loads, verifies,
-parses, and chunks its body, then pauses in a bounded demo-only pre-commit gate.
-
-The default question is:
-
-> What should the account team prioritize before Northstar's renewal?
-
-The deterministic evidence answer cites committed renewal, support, QBR, and stakeholder chunks.
-No external model is required.
-
-Deactivation atomically changes Lakebase from `active`/7 to `deactivating`/8 before Temporal asks
-old work to cancel. When the held generation-7 writer is released, it reaches the normal repository
-transaction and Lakebase rejects it as stale. Cleanup deletes documents in bounded batches and the
-store becomes `inactive` at generation 8 only after users, retrieval state, documents, and chunks
-are all empty.
-
-## Visible proof in the App
-
-The four-panel UI presents:
-
-1. authoritative Lakebase lifecycle state, generation, user/document/chunk counts, and controls;
-2. Temporal controller, sync, quota, ingestion, and deactivation workflow IDs, with optional
-   Temporal Web links;
-3. a durable event timeline containing the quota pause, held commit, `7 -> 8` fence,
-   stale-generation rejection, cleanup batches, and final inactive state;
-4. current-generation search results and a deterministic cited answer.
-
-The App polls durable operation and snapshot APIs. If a Temporal status query is temporarily
-unavailable, the combined snapshot still returns Lakebase state and a warning. Search and ask fail
-closed after the store leaves a readable state.
-
-## Architecture and ownership
+The App and worker are separate processes. The App may scale or restart as an HTTP service. The
+worker must remain on long-running compute and poll Temporal independently.
 
 ```mermaid
 flowchart LR
-    browser["Presenter browser"] --> app["FastAPI Databricks App<br/>UI + JSON API"]
-    app -->|"commands and controller queries"| temporal["Temporal namespace"]
-    app -->|"snapshot, search, controls, events"| lakebase[("Lakebase Postgres")]
-    temporal <--> worker["Separate retrieval-worker<br/>retrieval + provider queue pollers"]
-    worker -->|"generation-fenced transactions"| lakebase
-    worker --> fixtures["Packaged Northstar fixtures"]
-    lakebase --> search["Postgres FTS"]
+    browser[Browser] --> app[FastAPI App]
+    app -->|commands and queries| temporal[Temporal namespace]
+    app -->|state, search, events| lakebase[(Lakebase Postgres)]
+    temporal <--> worker[retrieval-worker]
+    worker -->|provider calls| provider[Provider and staging adapters]
+    worker -->|generation-fenced transactions| lakebase
 ```
 
-| Concern | Owner |
+## Core concepts
+
+### Store
+
+A **store** is one independently synchronized retrieval data set. It has a display name, lifecycle
+state, and current generation.
+
+### Generation
+
+A **generation** is a monotonically increasing integer. Every mutating command carries the
+generation it expects. Lakebase compares that value with the store row inside the same transaction
+as the mutation.
+
+### Controller
+
+Each store has one `StoreControllerWorkflow`. Applications send commands to this workflow through
+`RetrievalClient` using Temporal Update-with-Start. The controller serializes commands, assigns
+stable operation identities, and owns detached sync/deactivation work.
+
+### Joined and detached workflows
+
+A joined child must finish before its parent finishes. A detached operation receives a stable ID,
+is acknowledged by Temporal, and may outlive the controller run that started it. Detached work
+reports durable status back to the controller.
+
+## Store lifecycle
+
+The normal path is:
+
+```text
+active or syncing
+        |
+        | begin deactivation: commit generation N -> N + 1
+        v
+deactivating
+        |
+        | cancel, drain, clean users, clean objects
+        v
+inactive
+```
+
+If post-fence cleanup fails, the store remains at the new generation in a resumable failed state.
+The generation is never decremented.
+
+Deactivation order is fixed:
+
+1. lock the store and commit `N → N + 1` with state `deactivating`;
+2. acknowledge the fence to the controller;
+3. request cancellation of generation-`N` sync/remediation work;
+4. invalidate old quota requests and wait for owned work to drain for a bounded time;
+5. clean users at generation `N + 1`;
+6. delete documents in bounded batches at generation `N + 1`;
+7. mark the store `inactive` only after all owned rows are empty.
+
+Cancellation limits wasted work. The committed generation is the safety boundary.
+
+## Synchronization workflow
+
+The controller starts one `RootSyncWorkflow`. Joined descendants divide ownership and keep
+history/concurrency bounded:
+
+```text
+RootSyncWorkflow
+└── UserSyncWorkflow
+    └── ResourceSyncWorkflow
+        └── ResourcePagesWorkflow
+            └── FilesPageWorkflow
+                └── DocumentIngestionWorkflow
+```
+
+The hierarchy can also start bounded user activation and failed-user remediation. Each boundary
+owns one kind of state: user windows, resource cursors, page checkpoints, document concurrency, or
+remediation batches.
+
+Provider responses contain compact `DocumentRef` metadata. The ingestion Activity loads the body
+from a staging adapter, validates its URI/hash/UTF-8 content, parses frontmatter, chunks text, and
+performs the database transaction. Bodies and chunks never enter Workflow Event History.
+
+## Provider quota
+
+One `UserQuotaWorkflow` represents a quota scope defined by provider, opaque credential identity,
+and quota class. Callers request permits through a short bridge Activity, then wait on a durable
+workflow condition.
+
+When a provider returns structured quota exhaustion, the caller records the authoritative reset,
+preserves its cursor, and waits durably. Waiting consumes no Activity slot. The pending queue is
+bounded, permit requests are deduplicated, and completion releases only a real reservation.
+
+## Database mutation rules
+
+Every repository mutation follows these rules:
+
+1. start a transaction;
+2. lock/read the store row;
+3. compare expected generation and allowed lifecycle state;
+4. resolve the idempotency receipt while the generation is still writable;
+5. apply the mutation;
+6. commit the mutation and receipt together.
+
+For document upserts, metadata, all chunks, and the write receipt commit or roll back as one unit.
+Deletes use the same fence and receipt boundary.
+
+While a generation remains current and writable:
+
+- the same idempotency key and canonical payload returns the stored result;
+- reusing the key for a different payload is a conflict.
+
+After deactivation advances the generation, stale-generation rejection takes precedence over an
+old receipt. This is what prevents a previously accepted operation key from authorizing a late
+write into a deactivated store.
+
+## Database schemas
+
+Forward-only, checksum-verified migrations create two schemas. An advisory transaction lock
+serializes migration runners.
+
+### `retrieval`: authoritative retrieval state
+
+| Table | Contents |
 |---|---|
-| Command serialization and operation ownership | `StoreControllerWorkflow` |
-| User/resource/page/document fan-out | Joined Temporal workflow tree |
-| Provider permit/reset state | Shared `UserQuotaWorkflow` |
-| Lifecycle state and monotonic generation | `retrieval.stores` |
-| Acceptance/rejection of mutations | Lakebase transaction |
-| Searchable metadata, text chunks, and receipts | `retrieval` schema |
-| Northstar run controls, events, operations, and HTTP receipts | `retrieval_demo_ui` schema |
-| Demo document bodies | Packaged, manifest-allowlisted fixture files |
-| Presentation and asynchronous command submission | FastAPI App |
+| `schema_migrations` | applied version, name, checksum, actor, timestamp |
+| `stores` | display name, lifecycle state, generation, transition times |
+| `store_users` | per-store user state and generation |
+| `retrieval_state` | JSON synchronization/checkpoint state |
+| `documents` | source metadata, body hash, and committed generation |
+| `document_chunks` | deterministic chunks, hashes, generation, generated search vector |
+| `write_receipts` | operation identity, payload hash, generation, durable result |
 
-The worker and App are intentionally separate processes. A request-lifetime App process is not a
-safe home for long-lived Temporal pollers.
-
-The complete diagrams are in [`workflow-topology.md`](workflow-topology.md).
-
-## Correctness invariants
-
-1. A store generation is monotonic and never rewound.
-2. Deactivation commits generation `N + 1` and `deactivating` before cancellation.
-3. Normal writes require `active` or `syncing` and the exact current generation.
-4. Cleanup requires `deactivating` and the exact current generation.
-5. Lifecycle validation and mutation share one database transaction.
-6. Document metadata, all chunks, and the write receipt commit or roll back together.
-7. While its generation remains current and writable, same idempotency key plus the same canonical
-   payload is a successful duplicate; different payload reuse is a conflict. After a fence,
-   stale-generation rejection takes precedence over historical receipts.
-8. Search joins the current store generation and readable lifecycle state, so stale rows cannot be
-   returned even while cleanup is pending.
-9. Workflow history contains `DocumentRef` metadata, not provider bodies or chunks.
-10. Demo code remains unavailable unless `RETRIEVAL_DEMO_MODE=true`.
-11. A fresh run gets a new run ID and store key; reset never decrements an old store.
-12. Credentials, raw idempotency keys, document bodies, and clear-text DSNs are absent from demo
-    events and application metric labels.
-
-Cancellation reduces wasted work. It is not the safety boundary: the committed database generation
-is authoritative.
-
-## Lakebase core schema
-
-Forward-only, checksum-verified core migrations live in
-`src/retrieval/lakebase/migrations`. An advisory transaction lock serializes migration runners and
-applied checksums are verified before status or apply succeeds.
-
-| Table | Important contents |
-|---|---|
-| `retrieval.schema_migrations` | version, name, SHA-256 checksum, timestamp, actor |
-| `retrieval.stores` | display name, lifecycle state, generation, transition/update timestamps |
-| `retrieval.store_users` | active flag and generation by store/user |
-| `retrieval.retrieval_state` | JSON state value and generation by store/key |
-| `retrieval.documents` | source version/URI, body hash, metadata, and committed generation |
-| `retrieval.document_chunks` | deterministic ordinal, text, hash, generation, generated `tsvector` |
-| `retrieval.write_receipts` | operation, document, generation, payload hash, durable result |
-
-The document/chunk foreign key cascades chunk deletion. Generation indexes support cleanup and
-current-state reads. A GIN index supports the generated English full-text vector.
-
-### Document commit transaction
-
-For an upsert, `LakebaseRetrievalRepository`:
-
-1. starts a transaction and locks the store row;
-2. verifies expected generation and a writable lifecycle state;
-3. inserts or matches the durable idempotency receipt while the generation is still writable;
-4. upserts document metadata;
-5. replaces that document's chunks;
-6. commits all effects together.
-
-Deletes follow the same fence and receipt boundary. Serializable/deadlock failures are retried up
-to the configured transaction retry limit. A writer that reaches step 2 after a deactivation fence
-is stale even if it was scheduled earlier or has a historical receipt.
-
-### Bounded cleanup
-
-`RemoveObjectsWorkflow` schedules `remove_object_batch_generation_fenced` repeatedly. Each Activity
-locks and validates the store, deletes at most `OBJECT_CLEANUP_BATCH_SIZE` documents in stable key
-order, counts cascaded chunks, clears retrieval state once no documents remain, and reports whether
-another batch is needed. The workflow carries cumulative progress through Continue-As-New when
-Temporal suggests rollover.
-
-The code retains a versioned legacy branch for histories created before batching.
-`artifacts/histories/remove-objects-pre-batch.json` exercises that branch in replay tests.
-
-## Search and answers
-
-`PostgresTextSearch` is the supported backend. It uses `websearch_to_tsquery`, `ts_rank_cd`, stable
-document/chunk tie-breaking, bounded limits, and highlighted excerpts. Its SQL joins
-`document_chunks`, `documents`, and `stores`, requiring:
-
-- store state `active` or `syncing`;
-- document generation equal to the store generation; and
-- chunk generation equal to the store generation.
-
-`RETRIEVAL_SEARCH_BACKEND=postgres_text` is the default. `lakebase_hybrid` is a named reservation
-that fails explicitly because no hybrid index migration or adapter is bundled; it never silently
-masquerades as text search.
-
-The demo answerer orders retrieved Northstar evidence into a stable account brief and exposes each
-citation as `document_key#chunk-N`. This keeps the required demo independent of an answer-model
-network call.
-
-## Demo schema and controls
-
-Forward-only demo migrations live in `src/retrieval/demo/migrations`. The **migration role owns both
-`retrieval` and `retrieval_demo_ui`**, including the seed function. The App does not own either
-schema and this application never creates one at runtime. The managed Databricks resource may
-still confer database-level `CREATE`, as described in the deployment section below.
+### `retrieval_demo_ui`: Northstar presentation state
 
 | Object | Purpose |
 |---|---|
-| `demo_runs` | unique run/store mapping, baseline generation, presentation status |
-| `demo_controls` | quota-once flag, five-second retry, held document, hold/release state, version |
-| `demo_events` | deduplicated, bounded event timeline keyed by `(run_id, event_key)` |
-| `demo_operations` | asynchronous sync/deactivation/control/ask operation records |
-| `api_idempotency` | durable HTTP request/response receipts keyed by scope and key hash |
-| `schema_migrations` | demo migration version and checksum ledger |
-| `create_northstar_run(...)` | fixed-purpose, revoked-by-default `SECURITY DEFINER` seed function |
+| `demo_runs` | run ID, store key, baseline generation, status |
+| `demo_controls` | quota-once, hold, and release controls |
+| `demo_events` | deduplicated event timeline |
+| `demo_operations` | durable asynchronous operation status |
+| `api_idempotency` | HTTP request/response receipts |
+| `schema_migrations` | demo migration ledger |
+| `create_northstar_run(...)` | constrained `SECURITY DEFINER` seed function |
 
-The seed function accepts only the known Northstar display name, generation 7, five-second quota,
-held filename, `true` hold flag, and a constrained unique store-key format. It inserts the core
-store plus run, controls, and initial event atomically and rejects conflicting reuse.
+The migration identity owns both schemas. The App receives read access to core data and limited
+demo writes. It creates a run only through the fixed seed function. The worker receives the core
+mutation and demo control/event privileges required by its adapters. Public access is revoked.
 
-The App gets `EXECUTE` on this function, core `SELECT`, and explicit demo DML. It does not get core
-`INSERT`, `UPDATE`, or `DELETE`. The worker gets core DML and only the demo control/event access its
-scripted adapters need. Public schema/table/function access is revoked. Exact grants and their
-application command are in the [migration runbook](runbooks/migration-and-rollback.md).
+The Databricks App resource also grants database-level `CONNECT` and `CREATE` through
+`CAN_CONNECT_AND_CREATE`; deployments must use a dedicated database or explicitly revoke/recheck
+`CREATE` according to local policy.
 
-## Deterministic provider and late-writer gate
+## Search behavior
 
-`ScriptedNorthstarProvider` exposes one user and one files page containing the five versioned
-`DocumentRef` values. Its quota injection is an atomic update in `demo_controls`, so worker restarts
-or Activity retries cannot inject an unbounded series of quota errors.
+`PostgresTextSearch` is the supported backend. It uses `websearch_to_tsquery`, `ts_rank_cd`, stable
+tie-breaking, highlighted excerpts, a generated English `tsvector`, and a GIN index.
 
-`FixtureStagingStore` accepts only `fixture://northstar/...` URIs present in the packaged scenario
-manifest, rejects traversal/encoding tricks, and verifies the SHA-256 hash before returning bytes.
+A result is visible only when:
 
-`DemoBeforeDocumentCommitHook` runs after body verification, parsing, and chunking but before the
-repository transaction. It applies only to the configured late document. It emits a durable held
-event, heartbeats while waiting, observes a Lakebase release control, and times out after at most 30
-seconds. For the demo proof it absorbs Activity cancellation only inside this bounded wait, then
-allows the normal stale-generation transaction to execute. This does not change global Activity
-cancellation behavior.
+- the store is `active` or `syncing`;
+- the document generation equals the store generation; and
+- the chunk generation equals the store generation.
 
-## App API and process lifecycle
+This join hides stale and deactivating data even before physical cleanup finishes.
+`RETRIEVAL_SEARCH_BACKEND=postgres_text` selects this path. `lakebase_hybrid` is reserved but not
+implemented and fails explicitly.
 
-`apps.retrieval_demo.app` serves API and static assets from one FastAPI/Uvicorn process. Importing
-the module reads no environment and opens no connections. The FastAPI lifespan builds the service,
-opens Lakebase/Temporal resources, and closes resources even after partial startup failure.
+## HTTP API
 
-| Method and path | Behavior |
+The FastAPI process serves static UI files and JSON from one Uvicorn process. Importing the module
+does not read configuration or open connections; the application lifespan starts and closes
+Lakebase/Temporal resources.
+
+| Method and path | Purpose |
 |---|---|
-| `GET /healthz` | Process liveness only |
-| `GET /readyz` | Lakebase connectivity, both migration ledgers, and Temporal connectivity; 503 on failure |
-| `POST /api/demo/runs` | Create/idempotently replay a fresh fixed Northstar run; 201 |
-| `GET /api/demo/runs/{run_id}/snapshot` | Database snapshot plus best-effort controller status |
-| `GET /api/demo/runs/{run_id}/events` | Timeline with `after_event_id` and bounded `limit` |
-| `GET /api/demo/runs/{run_id}/search` | Current readable-generation search |
-| `POST /api/demo/runs/{run_id}/sync` | Submit async controller sync; 202 |
-| `POST /api/demo/runs/{run_id}/deactivate` | Submit async deactivation; 202 |
-| `POST /api/demo/runs/{run_id}/controls/hold` | Enable the configured hold before commit |
-| `POST /api/demo/runs/{run_id}/controls/release` | Release only after the generation fence |
-| `POST /api/demo/runs/{run_id}/ask` | Return deterministic cited evidence for `{question}` |
+| `GET /healthz` | Process liveness |
+| `GET /readyz` | Lakebase, both migration ledgers, and Temporal connectivity |
+| `POST /api/demo/runs` | Create/replay a fresh Northstar run |
+| `GET /api/demo/runs/{run_id}/snapshot` | Lakebase snapshot plus best-effort controller status |
+| `GET /api/demo/runs/{run_id}/events` | Read the durable timeline |
+| `GET /api/demo/runs/{run_id}/search` | Search current readable content |
+| `POST /api/demo/runs/{run_id}/sync` | Submit asynchronous sync |
+| `POST /api/demo/runs/{run_id}/deactivate` | Submit asynchronous deactivation |
+| `POST /api/demo/runs/{run_id}/controls/hold` | Enable the configured late-write hold |
+| `POST /api/demo/runs/{run_id}/controls/release` | Release the hold after the fence |
+| `POST /api/demo/runs/{run_id}/ask` | Return a deterministic cited answer |
 | `GET /api/operations/{operation_id:path}` | Poll durable operation state |
 
 Every `POST` requires `Idempotency-Key`. Same scope/key/request returns the stored response;
-different request reuse returns a conflict. Run/store authorization is derived server-side; the
-caller cannot supply an arbitrary store key.
+different request reuse returns a conflict. The server derives the run/store relationship instead
+of accepting an arbitrary store key from the caller.
 
-`TEMPORAL_WEB_BASE_URL` optionally enables safely encoded workflow deep links. It may be a base
-origin or a template containing `{namespace}` and `{workflow_id}`.
+## The Northstar demonstration
 
-The supported App executable loads the exact working-directory `.env`, or the file selected by
-`RETRIEVAL_ENV_FILE`, before reading its port and starting Uvicorn. Existing process values win and
-interpolation is disabled. Importing the module still reads no environment. Databricks deployments
-do not package local environment files; their resource, secret, and platform injection remains the
-runtime source of configuration.
+Northstar is a deterministic five-document scenario. A fresh run starts at generation 7.
 
-## Runtime configuration
-
-The complete variable tables and factory precedence are maintained in
-[`IMPLEMENTATION_MAP.md`](../IMPLEMENTATION_MAP.md#temporal-process-configuration). The essential
-full-stack values are:
-
-```text
-PGHOST, PGPORT, PGDATABASE, PGUSER, PGSSLMODE
-LAKEBASE_ENDPOINT                           # OAuth deployment
-# or PGPASSWORD                             # SSL-enabled local Postgres, never both
-
-TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE, TEMPORAL_TLS
-TEMPORAL_API_KEY                            # when required
-RETRIEVAL_DEMO_MODE=true
-RETRIEVAL_SEARCH_BACKEND=postgres_text
-RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle
-OBJECT_CLEANUP_BATCH_SIZE=250               # default
-```
-
-Databricks Apps injects canonical `PG*` values and the `LAKEBASE_ENDPOINT` resource path. The pool
-uses a fresh Databricks OAuth database token for each new physical connection and rotates
-connections before token lifetime is exhausted.
-
-## Local execution and verification
-
-No-service rehearsal:
-
-```bash
-uv sync --extra dev
-uv run retrieval-demo-headless --json
-```
-
-Full local processes:
-
-```bash
-temporal server start-dev
-uv run retrieval-lakebase-migrate
-uv run retrieval-demo-migrate
-uv run retrieval-lakebase-grant-roles \
-  --app-role <APP_DB_ROLE> --worker-role <WORKER_DB_ROLE>
-
-RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle \
-  uv run retrieval-worker
-
-uv run retrieval-demo-app
-curl --fail http://127.0.0.1:8000/readyz
-```
-
-Run the migration and grant commands with the migration owner. Run the worker and App with their
-own role credentials. The grant command is idempotent and quotes resolved role identifiers; it does
-not provision roles.
-
-Test layers:
-
-- unit and repository-port contract tests cover parsing, lifecycle fencing, idempotency, bounded
-  cleanup, configuration, demo state, and service behavior;
-- Lakebase tests validate emitted SQL, transaction/pool behavior, migrations, and FTS contracts
-  using test doubles;
-- App tests exercise endpoint idempotency, errors, readiness, snapshots, and the real in-memory
-  service through ASGI;
-- the headless story proves the deterministic quota/fence/stale-writer/cleanup data-plane path;
-- opt-in Temporal integration tests execute the general workflow tree against ephemeral servers;
-- an opt-in Temporal late-writer test runs the real `DocumentIngestionWorkflow`/Activity, cancels
-  the held work after the fence, and observes its stale commit attempt;
-- replay tests include root sync and the pre-batch object-cleanup history;
-- the opt-in load harness measures Temporal history/latency/fairness mechanics.
-
-These checks do not establish live Lakebase connectivity, target grants, Databricks App startup, or
-target Temporal compatibility. Those remain target-environment validation steps.
-
-## Deployable artifacts and validation boundary
-
-| Artifact | Location | Local validation |
+| Fixture | Demonstrated account fact | Runtime path |
 |---|---|---|
-| App source/process manifest | repository root plus `apps/retrieval_demo` | import/ASGI tests, compile, package build |
-| Databricks bundle | `apps/retrieval_demo/databricks.yml` | `databricks bundle validate` with explicit profile/variables |
-| Worker image | `Dockerfile.worker` | local Docker build and worker tests |
-| Core schema | `src/retrieval/lakebase/migrations` | discovery/checksum/SQL tests; migration CLI |
-| Demo schema and grants | `src/retrieval/demo/migrations` | discovery/SQL/grant-rendering tests; CLIs |
-| Static UI | `apps/retrieval_demo/static` | App/browser rehearsal |
+| `northstar-qbr.md` | EU residency and SCIM requirements | normal commit |
+| `renewal-plan.md` | September 30 renewal | normal commit |
+| `support-escalation.md` | August 15 P1 latency target | normal commit |
+| `stakeholders.md` | Aisha is the engineering champion | normal commit |
+| `late-security-review.md` | security review dependency | held before transaction |
 
-Validate the DAB from its own directory and never rely on an implicit Databricks profile:
+The scripted provider consumes one durable quota-once control and reports a five-second retry.
+Four documents commit at generation 7. The fifth is verified and chunked, then waits in a bounded
+demo-only pre-commit hook.
 
-```bash
-cd apps/retrieval_demo
-databricks bundle validate --strict --profile <PROFILE> -t dev \
-  --var lakebase_branch=projects/<PROJECT>/branches/<BRANCH> \
-  --var lakebase_database=projects/<PROJECT>/branches/<BRANCH>/databases/<DATABASE> \
-  --var temporal_secret_scope=<SECRET_SCOPE>
-```
+The fixed question asks what the account team should prioritize before renewal. The answerer uses
+Postgres search and returns four deterministic citations; no external model call is required.
 
-The bundle binds resource alias `postgres` with `CAN_CONNECT_AND_CREATE`, injects
-`LAKEBASE_ENDPOINT`, and maps Temporal address/namespace/API key from secrets. Bundle validation is
-read-only with respect to application deployment. The worker is deployed separately and is not a
-bundle App process. The bundle sync path promotes the repository root so the effective root
-`app.yaml`, pinned requirements, `apps`, and `src/retrieval` are deployed as one source tree;
-ignored `.env` files are not included.
+Deactivation advances the database to generation 8. Releasing the held generation-7 writer then
+produces `stale_generation_rejected`. Cleanup ends with state `inactive`, generation 8, and zero
+documents/chunks.
 
-`CAN_CONNECT_AND_CREATE` is a managed database-level grant: the App service principal receives
-PostgreSQL `CONNECT` and `CREATE` on the selected database. Explicit runtime grants still constrain
-existing core/demo objects, but do not revoke database `CREATE`. The selected database must
-therefore be dedicated to this App/demo boundary. If local policy requires a no-DDL runtime,
-revoke database `CREATE` after binding and repeat the effective-privilege test after every binding
-change; the application itself does not create schemas at runtime.
+The browser makes this proof visible through lifecycle counts, workflow IDs, the durable event
+timeline, search results, citations, and controls.
 
-## Least-privilege rollout order
+## Acceptance criteria
 
-For a future target environment:
+A complete environment passes when:
 
-1. provision/select a dedicated Lakebase branch and database, accounting for the App resource's
-   managed database `CREATE` privilege;
-2. identify the migration owner, App database role, and worker database role;
-3. apply core migrations as the migration owner;
-4. apply demo migrations as the same migration owner;
-5. apply explicit App/worker grants with `retrieval-lakebase-grant-roles`;
-6. check both migration ledgers and effective database/object privileges using each runtime
-   identity, including the App's post-binding database `CREATE` result;
-7. start at least one rehearsal worker and confirm both Task Queue pollers;
-8. start the App, verify `/healthz` and `/readyz`, and run a fresh Northstar rehearsal;
-9. only then consider admitting demonstration traffic.
+- both migration CLIs report `ready: true`;
+- the App and worker use distinct database roles with reviewed grants;
+- the worker polls both Task Queues;
+- `/healthz` and `/readyz` return 200;
+- a fresh Northstar run observes one quota wait and four committed documents;
+- the held document is rejected after the `7 → 8` fence;
+- cleanup finishes at `inactive`, generation 8, with zero owned rows;
+- no credential, document body, raw idempotency key, or clear-text DSN appears in events/metrics.
 
-For a production launch rather than a controlled demo, complete the additional HA, real-provider,
-telemetry, security, representative replay, capacity, backup, and incident-response gates in
-[`architecture-production-readiness.md`](architecture-production-readiness.md).
-
-## Presenter sequence
-
-1. Create a fresh run and show `active`, generation 7, zero documents.
-2. Click **Sync account**; point out the quota event and durable wait/resume.
-3. Show four committed documents and the held security-review document.
-4. Ask the default question and inspect the four citations.
-5. Click **Deactivate workspace** and stop on the database event `7 -> 8`.
-6. Click **Release late write** only after the fence.
-7. Show expected generation 7 versus actual generation 8 in
-   `stale_generation_rejected`.
-8. Show bounded cleanup events and final `inactive`, generation 8, zero documents/chunks.
-
-If the run is contaminated, create another run. Never rewrite its generation. If Temporal Web is
-unavailable, workflow IDs and database events remain visible. Native `postgres_text` is the only
-bundled search backend and needs no external answer model.
+Deployment steps are in the [Databricks runbook](runbooks/deploy-lakebase-temporal-demo.md).
+Production requirements beyond this controlled scenario are in the
+[production-readiness guide](architecture-production-readiness.md).

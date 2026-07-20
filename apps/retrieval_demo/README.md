@@ -1,78 +1,146 @@
-# Lakebase + Temporal demo App
+# Retrieval demo App
 
-This directory contains the single-process FastAPI presentation layer. It serves the four-panel UI
-and JSON API from one Uvicorn process; the Temporal workers remain a separate long-running process.
-The App reads authoritative lifecycle/search data from Lakebase and submits asynchronous commands to
-Temporal. It never runs workflow Activities itself.
+This directory contains the FastAPI HTTP API and browser UI for the Northstar demonstration. The
+App is a command/read gateway:
 
-## Local check
+- it submits commands to a store's Temporal controller;
+- it reads lifecycle state, search results, controls, and events from Lakebase;
+- it serves the static four-panel UI;
+- it does **not** run Temporal workflows or Activities.
 
-From the repository root, install the demo dependencies and create the ignored per-role environment
-files described in the root documentation. The executable commands load the selected file without
-overriding variables already injected by the shell or runtime. Apply the schemas/grants as the
-migration owner:
+The long-running `retrieval-worker` is a separate process and deployment.
+
+## Directory contents
+
+| Path | Purpose |
+|---|---|
+| `app.py` | FastAPI routes, error mapping, lifespan, and Uvicorn entry point |
+| `static/index.html` | Browser document |
+| `static/app.js` | UI state, polling, commands, and rendering |
+| `static/app.css` | UI layout and styles |
+| `databricks.yml` | Databricks Asset Bundle for the App/resource bindings |
+| `app.yaml` | directory-local command manifest; root `app.yaml` is the effective bundled manifest |
+| `requirements.txt` | pinned App dependencies used by Databricks Apps |
+
+## Runtime request flow
+
+1. A browser sends an HTTP request to FastAPI.
+2. Every `POST` requires an `Idempotency-Key`.
+3. The service stores/replays the HTTP receipt in Lakebase.
+4. Sync/deactivation commands go to `RetrievalClient` and the store controller.
+5. The request returns an operation identity without waiting for workflow completion.
+6. The browser polls snapshots, operations, and events.
+
+If a Temporal status query is temporarily unavailable, snapshots still return authoritative
+Lakebase state with a warning. Search and answer requests fail closed when the store is no longer
+in a readable lifecycle state.
+
+## Dependencies and identities
+
+The App needs:
+
+- Lakebase/Postgres with both schemas migrated;
+- an App database role with the explicit repository grants;
+- a reachable Temporal namespace and valid API key/TLS configuration;
+- `RETRIEVAL_DEMO_MODE=true`;
+- a separately deployed worker before workflow commands can progress.
+
+The App role is read-oriented for the core schema. It creates a fixed Northstar run through the
+migration-owned `SECURITY DEFINER` function and writes only allowed demo objects. It must not share
+the worker database identity.
+
+## Run locally
+
+From the repository root, install dependencies:
 
 ```bash
-uv sync --extra dev
+uv sync --frozen --extra dev
+```
+
+Create protected per-role environment files as described in the root
+[README](../../README.md#run-the-complete-demo-locally), then apply migrations/grants as the owner:
+
+```bash
 RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-migrate
 RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-demo-migrate
 RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-grant-roles \
-  --app-role <APP_DB_ROLE> --worker-role <WORKER_DB_ROLE>
+  --app-role <APP_DATABASE_ROLE> \
+  --worker-role <WORKER_DATABASE_ROLE>
 ```
 
-Start `retrieval-worker` separately with the worker role:
+Start the worker in one terminal:
 
 ```bash
-RETRIEVAL_ENV_FILE=.env.worker uv run retrieval-worker
+RETRIEVAL_ENV_FILE=.env.worker \
+RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle \
+uv run retrieval-worker
 ```
 
-Then start the App with App-role credentials:
+Start the App with the App identity in another terminal:
 
 ```bash
 RETRIEVAL_ENV_FILE=.env.app uv run retrieval-demo-app
 ```
 
-If one local identity is acceptable, copy `.env.example` to `.env`, fill it in, run
-`chmod 600 .env`, and omit `RETRIEVAL_ENV_FILE`. The exact `.env` in the working directory is
-loaded; no parent directory search occurs. An empty selector disables loading. Environment-file
-interpolation is disabled, so `${NAME}` remains literal. Direct Python imports do not load a file.
+Verify and open it:
 
-The local fallback URL is <http://127.0.0.1:8000>. `DATABRICKS_APP_PORT` overrides port 8000 and the
-server always binds to `0.0.0.0` as required by Databricks Apps.
+```bash
+curl --fail http://127.0.0.1:8000/healthz
+curl --fail http://127.0.0.1:8000/readyz
+```
 
-Importing `apps.retrieval_demo.app` does not inspect environment variables or make network calls.
-Configuration validation and connections happen inside the FastAPI lifespan.
-An external `uvicorn apps.retrieval_demo.app:app` launch bypasses the project executable and must
-receive an already-injected process environment; use `retrieval-demo-app` for automatic loading.
+The default URL is <http://127.0.0.1:8000>. `DATABRICKS_APP_PORT` overrides the port; the server
+always binds to `0.0.0.0`.
 
-Set `TEMPORAL_WEB_BASE_URL` to a Temporal Web origin to enable workflow deep links. The App appends
-`/namespaces/<namespace>/workflows/<workflow-id>`. A custom URL template may instead contain
-`{namespace}` and `{workflow_id}` placeholders. Only credential-free HTTP(S) links are emitted.
+Use the executable instead of invoking Uvicorn directly. `retrieval-demo-app` performs the safe
+environment-file injection; an external Uvicorn command must receive an already prepared process
+environment.
 
-## Deployment inputs
+## Environment loading
 
-The nested `databricks.yml` is a reusable bundle definition. Supply these values explicitly for the
-target workspace; do not commit them:
+- The executable inspects only `.env` in the current working directory.
+- `RETRIEVAL_ENV_FILE=<path>` selects another file.
+- `RETRIEVAL_ENV_FILE=` disables file loading.
+- Process/platform values win over file values.
+- `${NAME}` interpolation is disabled.
+- Importing `apps.retrieval_demo.app` reads no environment and opens no connection.
 
-- `lakebase_branch`: full `projects/.../branches/...` resource name;
-- `lakebase_database`: full `projects/.../branches/.../databases/...` resource name;
-- `temporal_secret_scope`: a scope containing `temporal-address`, `temporal-namespace`, and
-  `temporal-api-key` (or override the three key-name variables).
+Do not package or commit `.env` files.
 
-The `postgres` resource grants the App service principal `CAN_CONNECT_AND_CREATE` and injects the
-standard `PG*` variables plus `LAKEBASE_ENDPOINT`. Temporal values are injected from secrets; they
-are not present in source or bundle variables. The bundle syncs the repository root so the
-effective root `app.yaml`, requirements, `apps`, and `src/retrieval` are packaged together; ignored
-`.env` files are not shipped.
+## HTTP endpoints
 
-The managed resource permission includes PostgreSQL `CONNECT` and `CREATE` on the selected
-database. Explicit repository grants narrow access to existing objects but do not revoke this
-database-level permission. Bind the App to a dedicated database; if policy requires a no-DDL App
-identity, revoke database `CREATE` after binding and re-verify it after every binding update as
-described in the migration runbook.
+| Method and path | Purpose |
+|---|---|
+| `GET /healthz` | Process liveness only |
+| `GET /readyz` | Lakebase, both migration ledgers, and Temporal connectivity |
+| `POST /api/demo/runs` | Create/replay a fresh Northstar run |
+| `GET /api/demo/runs/{run_id}/snapshot` | Lifecycle/counts plus best-effort workflow status |
+| `GET /api/demo/runs/{run_id}/events` | Durable event timeline |
+| `GET /api/demo/runs/{run_id}/search` | Current-generation text search |
+| `POST /api/demo/runs/{run_id}/sync` | Submit asynchronous sync |
+| `POST /api/demo/runs/{run_id}/deactivate` | Submit asynchronous deactivation |
+| `POST /api/demo/runs/{run_id}/controls/hold` | Enable the configured late-writer hold |
+| `POST /api/demo/runs/{run_id}/controls/release` | Release after the generation fence |
+| `POST /api/demo/runs/{run_id}/ask` | Return deterministic cited evidence |
+| `GET /api/operations/{operation_id:path}` | Poll operation state |
 
-When an authenticated Databricks profile is available, validate from this directory with explicit
-workspace and variables:
+`TEMPORAL_WEB_BASE_URL` optionally enables workflow deep links. It may be a base origin or a
+template containing `{namespace}` and `{workflow_id}`. Only credential-free HTTP(S) links are
+returned to the browser.
+
+## Databricks bundle inputs
+
+Run bundle commands from this directory. Required variables are:
+
+| Variable | Value |
+|---|---|
+| `lakebase_branch` | full `projects/.../branches/...` resource name |
+| `lakebase_database` | full `projects/.../branches/.../databases/...` resource name |
+| `temporal_secret_scope` | scope containing address, namespace, and API key |
+
+The default secret keys are `temporal-address`, `temporal-namespace`, and `temporal-api-key`.
+
+Validate without deploying:
 
 ```bash
 databricks bundle validate --strict --profile <PROFILE> -t dev \
@@ -81,25 +149,33 @@ databricks bundle validate --strict --profile <PROFILE> -t dev \
   --var temporal_secret_scope=<SECRET_SCOPE>
 ```
 
-Validation is read-only. Deployment is intentionally not part of the local build or test workflow.
-Before a future deployment, use the migration identity to apply core migration, demo migration,
-then the explicit runtime grants; start the separate worker; and perform the readiness and browser
-rehearsal checks in the repository runbook. The migration identity owns both schemas. The App gets
-core reads, demo DML, and `EXECUTE` on the fixed seed function; it does not own the demo schema or
-receive core DML.
+The `postgres` binding injects canonical `PG*` values, App OAuth identity, and
+`LAKEBASE_ENDPOINT`. Secret resources inject Temporal configuration. Bundle sync includes the
+repository root so root `app.yaml`, root requirements, `apps`, and `src/retrieval` deploy together;
+ignored environment files are excluded.
 
-## Runtime checks
+`bundle deploy` creates/updates the resource and uploads source. It does not start/deploy the App
+process. After migrations/grants are ready, run:
 
-- `GET /healthz` reports only process liveness.
-- `GET /readyz` checks Lakebase connectivity, migration state, and Temporal connectivity.
-- Every `POST` requires `Idempotency-Key`; receipts live in Lakebase so replay safety survives App
-  restarts.
-- A combined run snapshot keeps returning Lakebase state when a Temporal status query is temporarily
-  unavailable.
-- Search and ask operations fail closed once a store starts deactivating.
+```bash
+databricks bundle run retrieval_demo --profile <PROFILE> -t dev \
+  --var lakebase_branch=projects/<PROJECT>/branches/<BRANCH> \
+  --var lakebase_database=projects/<PROJECT>/branches/<BRANCH>/databases/<DATABASE> \
+  --var temporal_secret_scope=<SECRET_SCOPE>
+```
 
-No App deployment has been performed from this repository. Live workspace authentication,
-Lakebase role mapping, networking, secret access, and readiness remain target-specific checks.
-Follow the repository's
-[`Lakebase + Temporal deployment runbook`](../../docs/runbooks/deploy-lakebase-temporal-demo.md)
-for the first-deploy bootstrap order, worker environment contract, verification, and rollback.
+Follow the complete [deployment runbook](../../docs/runbooks/deploy-lakebase-temporal-demo.md) for
+identity creation, migrations, worker handoff, verification, and rollback.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Bundle summary says App URL is not deployed | Run `bundle run retrieval_demo` after prerequisites |
+| App crashes with missing migrations | Apply both schemas and grants, then redeploy |
+| App crashes with `Jwt is missing` | Re-enter the Temporal API key without a trailing newline |
+| Database permission error | Verify App `service_principal_client_id` equals the granted Postgres role |
+| `/readyz` redirects | Authenticate through Databricks OIDC first |
+| `/readyz` reports Temporal false | Address, namespace, API key, TLS, and outbound egress |
+| Commands stay pending | Confirm a worker polls both Task Queues/current build |
+| Workflow links are absent | Configure `TEMPORAL_WEB_BASE_URL` |

@@ -1,26 +1,53 @@
-# Deploy Golden Retriever through tmprl-demo.cloud
+# Deploy through tmprl-demo.cloud
 
-This runbook covers the source-repository inputs that accompany the `DemoProject` resource at
-`projects/demo/golden-retriever.yaml` in `temporal-sa/tmprl-demo-cloud-registry`.
+This runbook deploys the repository's App and worker images through the external
+`temporal-sa/tmprl-demo-cloud-registry` platform. It is for operators who already have access to
+that registry and its AWS account.
 
-The registry owns the Kubernetes namespace, ECR repositories and image builds, Temporal Cloud
-namespace and API key, Worker Controller rollout, ingress, and smoke check. Lakebase is an external
-dependency: create it and its identities before merging the registry resource.
+If you do not use tmprl-demo.cloud, follow the general
+[Databricks + external worker runbook](deploy-lakebase-temporal-demo.md) instead.
 
-## Runtime shape
+## Division of responsibility
 
-| Component | Image source | Platform services | External secret |
-| --- | --- | --- | --- |
-| `app` | `Dockerfile.app` | Temporal client, HTTPS ingress on port 8000 | `lakebase-app` |
-| `worker` | `Dockerfile.worker` | Versioned Temporal worker | `lakebase-worker` |
+The source repository supplies:
 
-The public URL is `https://golden-retriever.tmprl-demo.cloud`. Registry authentication remains
-enabled. The rollout smoke check calls `/readyz`, which verifies both Lakebase migrations and
-Temporal connectivity.
+- `Dockerfile.app` for the FastAPI/UI process;
+- `Dockerfile.worker` for the long-running Temporal worker;
+- Lakebase migrations and role grants;
+- the environment contract documented below.
 
-## 1. Prepare Lakebase
+The tmprl-demo.cloud registry supplies:
 
-Create or select one dedicated Lakebase Autoscaling branch, endpoint, and database. Record:
+- Kubernetes namespace and workload resources;
+- ECR repositories and source-image builds;
+- Temporal Cloud namespace/API key;
+- Worker Controller rollout/versioning;
+- HTTPS ingress, authentication, and `/readyz` smoke checks.
+
+Lakebase remains external to the registry. Create its database and identities before merging the
+registry project resource.
+
+## Resulting runtime
+
+| Component | Source | Platform integration | External secret |
+|---|---|---|---|
+| `app` | `Dockerfile.app` | HTTPS ingress, Temporal client, port 8000 | `lakebase-app` |
+| `worker` | `Dockerfile.worker` | versioned Temporal worker | `lakebase-worker` |
+
+The expected URL is `https://golden-retriever.tmprl-demo.cloud` and remains authenticated.
+
+## Prerequisites
+
+- Databricks OAuth profile with Lakebase/project administration;
+- dedicated Lakebase branch, endpoint, and database;
+- two Databricks service principals with OAuth M2M secrets;
+- permission to create AWS Secrets Manager values in the registry account;
+- permission to validate/merge the registry's `DemoProject` resource;
+- local `uv`, Docker, and the locked repository dependencies.
+
+## 1. Record Lakebase resources
+
+Create/select one dedicated Lakebase branch and record the API resource names and endpoint host:
 
 ```text
 LB_BRANCH_NAME=projects/<project>/branches/<branch>
@@ -29,8 +56,13 @@ LB_ENDPOINT_HOST=<endpoint-host>
 LB_DATABASE=databricks_postgres
 ```
 
-Create two dedicated Databricks service principals, add them to the workspace, issue OAuth M2M
-secrets, and create their Lakebase roles if the roles do not already exist:
+Use a database dedicated to this App boundary. Confirm endpoint capacity, retention, and outbound
+network requirements.
+
+## 2. Create App and worker Lakebase roles
+
+Create two service principals, add them to the workspace, and issue their OAuth secrets through an
+approved process. Their client IDs become the Postgres role names and `PGUSER` values.
 
 ```bash
 databricks postgres create-role "$LB_BRANCH_NAME" golden-retriever-app \
@@ -42,12 +74,12 @@ databricks postgres create-role "$LB_BRANCH_NAME" golden-retriever-worker \
   --profile "$DBX_PROFILE"
 ```
 
-The `postgres_role` and `PGUSER` values are the service-principal client IDs, not the role resource
-slugs.
+The API role slugs are labels. Runtime configuration and grants use the service-principal client
+IDs returned as `postgres_role`.
 
-## 2. Apply migrations and grants
+## 3. Apply schemas and grants
 
-Use the Lakebase project creator/database owner as the migration identity. From this repository:
+From this repository, connect as the Lakebase project creator/database owner:
 
 ```bash
 uv sync --frozen --extra lakebase
@@ -69,25 +101,27 @@ uv run retrieval-demo-migrate
 uv run retrieval-lakebase-grant-roles \
   --app-role "$APP_CLIENT_ID" \
   --worker-role "$WORKER_CLIENT_ID"
+
 uv run retrieval-lakebase-migrate --check --json
 uv run retrieval-demo-migrate --check --json
 ```
 
-Both checks must return `"ready": true`. Re-run migrations and grants before a rollout whenever a
-new numbered migration adds database objects.
+Both checks must report `"ready": true`. Run effective privilege tests described in the
+[migration runbook](migration-and-rollback.md).
 
-## 3. Create project secrets
+## 4. Create registry secrets
 
-Create these AWS Secrets Manager JSON secrets in the registry's AWS account and region. Use the
-AWS console or secret-safe tooling; do not commit the values or place client secrets in shell
-history.
+Create these AWS Secrets Manager JSON secrets in the account/region used by the registry:
 
 ```text
 tmprl-dem-cld/golden-retriever/lakebase-app
 tmprl-dem-cld/golden-retriever/lakebase-worker
 ```
 
-Each secret has this shape, with the matching app or worker service-principal values:
+Use the AWS console or approved secret-safe tooling. Do not commit or paste client secrets into
+shell history.
+
+Each secret has the same shape but uses its own App or worker identity:
 
 ```json
 {
@@ -103,13 +137,10 @@ Each secret has this shape, with the matching app or worker service-principal va
 }
 ```
 
-The registry validates that every property is present before rendering the components. The
-Databricks SDK generates a short-lived Lakebase credential for each new database connection; no
-database password is stored.
+The registry validates required properties. The Databricks SDK exchanges M2M credentials for
+short-lived Lakebase credentials; no Postgres password is stored.
 
-## 4. Validate the source images
-
-From this repository:
+## 5. Validate source images
 
 ```bash
 make verify
@@ -117,23 +148,23 @@ docker build -f Dockerfile.app -t golden-retriever-app:local .
 docker build -f Dockerfile.worker -t golden-retriever-worker:local .
 ```
 
-Both images run as UID 10001. The App listens on `0.0.0.0:8000`; the worker has no HTTP port and
-needs at least 45 seconds of termination grace for coordinated poller shutdown.
+Both images run as UID 10001. The App listens on `0.0.0.0:8000`. The worker exposes no HTTP port
+and requires at least 60 seconds of termination grace.
 
-## 5. Validate and merge the registry resource
+## 6. Validate the registry resource
 
-In `tmprl-demo-cloud-registry`, validate the complete registry before committing:
+The registry resource is `projects/demo/golden-retriever.yaml`. In the
+`tmprl-demo-cloud-registry` repository, validate all projects before committing:
 
 ```bash
 uv run --isolated --with jsonschema --with pyyaml python scripts/validate_projects.py
 ```
 
-The resource intentionally tracks `lakebase-variant`, the branch containing these assets. Change
-`spec.source.branch` to `main` after this implementation is merged there. Merging the registry
-resource starts source reconciliation, image builds, Temporal provisioning, Worker Controller
-rollout, and the `/readyz` promotion gate.
+Confirm `spec.source.branch` points at the source revision/branch containing the intended App,
+worker, migrations, and lock file. Merging the resource triggers source reconciliation, image
+builds, Temporal provisioning, Worker Controller rollout, ingress, and readiness promotion.
 
-## 6. Verify the deployment
+## 7. Verify the deployment
 
 After the registry reports the project active:
 
@@ -142,9 +173,26 @@ curl -fsS https://golden-retriever.tmprl-demo.cloud/healthz
 curl -fsS https://golden-retriever.tmprl-demo.cloud/readyz
 ```
 
-Open the authenticated URL, create a Northstar run, start sync, hold and release the late writer,
-ask the fixed evidence question, and deactivate the store. Confirm both `retrieval-v2` and
-`retrieval-provider-v2` have current pollers in the project Temporal Cloud namespace.
+Then:
 
-The cluster needs outbound TLS access to the Temporal Cloud endpoint, the Databricks workspace
-control plane, and the Lakebase endpoint on TCP 5432.
+1. open the authenticated URL;
+2. create a fresh Northstar run;
+3. start sync and observe quota wait/resume;
+4. verify four committed documents and the held writer;
+5. ask the fixed evidence question;
+6. deactivate and release the writer after the generation fence;
+7. verify stale rejection and final inactive/zero-row state;
+8. confirm current pollers on `retrieval-v2` and `retrieval-provider-v2`.
+
+The cluster requires outbound TLS to Temporal Cloud, the Databricks workspace/control plane, and
+the Lakebase endpoint on TCP 5432.
+
+## Rollback
+
+- Stop new commands if readiness or the rehearsal fails.
+- Keep worker builds that own open workflows.
+- Restore the previous registry source revision/image digests through the platform's reviewed
+  rollout procedure.
+- Do not edit applied migrations or decrement a store generation.
+- Use the [general rollback procedure](migration-and-rollback.md#rollback-and-recovery) for
+  database or workflow compatibility failures.

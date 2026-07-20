@@ -1,17 +1,24 @@
 # Temporal integration tests
 
-The repository has three complementary Temporal test layers:
+Integration tests execute real Temporal Workflow Event Histories instead of calling workflow code
+as ordinary Python. Use them after the default unit/contract suite and before deploying a worker
+change.
 
-- fast provider contract tests run in the default suite without a server;
-- `tests/integration` runs the controller, quota, provider, full workflow tree, and local starter
-  against real Temporal Workflow histories;
-- `tests/demo/test_temporal_late_writer.py` runs the real document workflow/Activity cancellation
-  path and proves the held generation-7 writer attempts a commit after the generation-8 fence.
+These tests use in-memory or scripted provider/database adapters. They validate Temporal behavior,
+not live Lakebase permissions or production provider compatibility.
 
-The Temporal scenarios are opt-in because the Python SDK may start a local server process and
-download its matching Temporal CLI binary.
+## Test layers
 
-## Run every Temporal integration test
+| Layer | Location | What it exercises |
+|---|---|---|
+| Provider contracts | default suite | provider delays, cancellation, auth errors, quota mapping |
+| General Temporal integration | `tests/integration` | controller, quota, provider, complete workflow hierarchy |
+| Northstar late writer | `tests/demo/test_temporal_late_writer.py` | real ingestion cancellation after generation fence |
+
+The Temporal scenarios are opt-in because the SDK may start a local server process and download a
+matching Temporal CLI binary.
+
+## Run with SDK-managed servers
 
 From the repository root:
 
@@ -19,58 +26,65 @@ From the repository root:
 RUN_TEMPORAL_INTEGRATION=1 uv run pytest -m integration
 ```
 
-Most scenarios start SDK-managed ephemeral servers. No separately running
-`temporal server start-dev` or `retrieval-worker` is required.
+Most tests create isolated ephemeral servers and unique Task Queues. Do not start
+`retrieval-worker` or `temporal server start-dev` separately.
 
-Run only the Northstar canceled late-writer proof:
+Run only the Northstar late-writer proof:
 
 ```bash
-RUN_TEMPORAL_INTEGRATION=1 uv run pytest -q tests/demo/test_temporal_late_writer.py
+RUN_TEMPORAL_INTEGRATION=1 \
+uv run pytest -q tests/demo/test_temporal_late_writer.py
 ```
 
-That test uses an SDK time-skipping server and in-memory persistence so it can deterministically
-observe `document_commit_held`, commit the `7 -> 8` fence, cancel the real
-`DocumentIngestionWorkflow`, release the bounded gate, and observe
-`stale_generation_rejected`. It proves the Temporal cancellation path, not live Lakebase SQL.
+That scenario observes a held generation-7 document, commits the generation-8 fence, cancels the
+real ingestion workflow, releases the bounded hold, and verifies a stale repository mutation. Its
+repository is in memory; Lakebase SQL is covered by separate tests and live deployment checks.
 
-## Run `tests/integration` against an existing namespace
+## Run against an existing namespace
 
 Use a dedicated disposable namespace because the suite starts and closes executions:
 
 ```bash
-TEMPORAL_INTEGRATION_ADDRESS=<FRONTEND_ADDRESS> \
+TEMPORAL_INTEGRATION_ADDRESS=<FRONTEND_HOST_PORT> \
 TEMPORAL_INTEGRATION_NAMESPACE=<TEST_NAMESPACE> \
 TEMPORAL_INTEGRATION_API_KEY=<API_KEY_IF_REQUIRED> \
 RUN_TEMPORAL_INTEGRATION=1 \
 uv run pytest -m integration tests/integration
 ```
 
-The namespace defaults to `default`; TLS is enabled when an API key is present. The helper does not
-expose separate certificate/mTLS options. Extend it before using a namespace with different
-connection requirements.
+Defaults:
 
-The Northstar late-writer test is intentionally local and does not use the external namespace
-variables.
+- namespace: `default`;
+- TLS: enabled when an API key is present.
 
-## What the scenarios verify
+The helper does not expose client-certificate/mTLS configuration. Extend/review it before using a
+namespace with different authentication. The Northstar late-writer test always uses its local
+time-skipping server and ignores the external-namespace variables.
 
-- provider delay and Activity cancellation behavior;
+Never run against a shared production Task Queue. External namespaces retain closed histories
+according to their retention policy.
+
+## Behaviors covered
+
+- provider delay and Activity cancellation;
 - non-retryable provider authentication failure;
-- structured provider exhaustion/reset observations;
-- two callers sharing one credential and `UserQuotaWorkflow`;
-- quota permit Signal-with-Start reuse;
-- public local sync/deactivation starter behavior;
-- controller sync and idempotent deactivation commands;
-- provider -> staged body -> document mutation through the complete workflow hierarchy;
-- a cancellation-resistant demo hold reaching a stale repository mutation after the fence.
+- structured quota exhaustion and reset observations;
+- multiple callers sharing one quota scope;
+- permit Signal-with-Start reuse;
+- public local sync/deactivation starter;
+- controller command idempotency;
+- provider reference → staged body → generation-fenced document mutation;
+- cancellation-resistant demo hold reaching a stale mutation after the fence.
 
-Every scenario uses unique Workflow IDs and Task Queues. An external namespace retains closed test
-histories according to its policy.
+## Interpreting success
 
-## What these tests do not prove
+A passing suite proves the tested code is deterministic and behaves correctly in the supplied
+Temporal scenarios. It does not prove:
 
-The integration suite uses in-memory or scripted adapters. Passing it does not establish target
-Lakebase connectivity, migration/grant correctness, real-provider compatibility, target namespace
-limits, production capacity, or a complete replay sample. Combine it with the
-[replay suite](../replay/README.md), [load harness](../load/README.md), Lakebase contract tests, and
-[production-readiness guide](../../docs/architecture-production-readiness.md).
+- target Lakebase connectivity/migrations/grants;
+- compatibility with a real provider;
+- target namespace limits or production capacity;
+- replay compatibility for histories not supplied to the test.
+
+Combine it with the [replay suite](../replay/README.md), [load harness](../load/README.md), default
+Lakebase/App tests, and the [production-readiness guide](../../docs/architecture-production-readiness.md).

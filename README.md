@@ -1,339 +1,271 @@
-# Temporal retrieval with Lakebase
+# Durable retrieval with Temporal and Lakebase
 
-This repository is a reference implementation of a durable retrieval pipeline. Temporal owns
-orchestration, retries, provider quota waits, cancellation, remediation, and cleanup order.
-Lakebase Postgres owns the authoritative store lifecycle, searchable documents, durable
-idempotency receipts, and the transaction that accepts or rejects every write.
+This repository demonstrates how to synchronize searchable documents safely when work is slow,
+retried, rate-limited, canceled, or still finishing during deactivation.
 
-It includes:
+The central idea is simple:
 
-- the complete Temporal workflow hierarchy and public `RetrievalClient`;
-- in-memory adapters and a local orchestration smoke test;
-- an async Lakebase/Postgres repository, forward-only migrations, and Postgres full-text search;
-- a deterministic five-document Northstar AI scenario with a quota pause and a held late writer;
-- a no-service headless rehearsal of the data-safety story;
-- a FastAPI Databricks App with a four-panel browser UI and durable HTTP idempotency;
-- a Databricks Asset Bundle definition and a separate worker container.
+- **Temporal** remembers what must happen next and coordinates work across failures.
+- **Lakebase Postgres** stores what is currently true and decides whether each write is still
+  allowed.
+- **The Databricks App** gives people a browser and HTTP API for starting commands and inspecting
+  results.
+- **A separate worker process** runs Temporal workflows and Activities. The App never runs a
+  worker.
 
-The deployment artifacts are prepared and locally testable. **No Databricks App, Lakebase
-database, or Temporal worker has been deployed from this repository.** Authentication, grants,
-networking, migrations, and readiness must still be validated in the intended target environment.
+The repository includes a deterministic demonstration named **Northstar**. It synchronizes five
+documents, pauses once for provider quota, deliberately holds one document write, deactivates the
+store, and proves that the late write cannot cross the database generation fence.
 
-## Start here
+## What you can do with this repository
 
-1. Read this page for setup and the shortest runnable paths.
-2. Read [`IMPLEMENTATION_MAP.md`](IMPLEMENTATION_MAP.md) to find code and configuration.
-3. Use [`docs/workflow-topology.md`](docs/workflow-topology.md) for the architecture and workflow
-   diagrams.
-4. Use [`docs/lakebase-temporal-demo-spec.md`](docs/lakebase-temporal-demo-spec.md) as the as-built
-   Northstar architecture and presenter reference.
-5. Before any rollout, follow
-   [`docs/runbooks/deploy-lakebase-temporal-demo.md`](docs/runbooks/deploy-lakebase-temporal-demo.md),
-   [`docs/runbooks/deploy-tmprl-demo-cloud.md`](docs/runbooks/deploy-tmprl-demo-cloud.md),
-   [`docs/runbooks/migration-and-rollback.md`](docs/runbooks/migration-and-rollback.md), and the
-   [`production-readiness guide`](docs/architecture-production-readiness.md).
+- run a no-service rehearsal in a few seconds;
+- run the Temporal workflow hierarchy against a local Temporal server;
+- run the complete App, worker, and Lakebase-backed demonstration;
+- deploy the App with a Databricks Asset Bundle and deploy the worker independently;
+- inspect forward-only database migrations, least-privilege grants, replay histories, and
+  production-readiness gates;
+- adapt the workflow and repository ports to a real provider and staging system.
 
-## Mental model
+The Northstar provider and its documents are demonstration fixtures. They are not a customer-data
+connector or a production staging service.
 
-Each store has one long-lived `StoreControllerWorkflow`. Applications use `RetrievalClient`
-Update-with-Start commands rather than starting sync or deactivation workflows directly.
+## How the system works
+
+Every retrieval data set is a **store**. One long-lived `StoreControllerWorkflow` serializes that
+store's sync and deactivation commands. A sync creates a bounded hierarchy of child workflows:
 
 ```text
 StoreControllerWorkflow
-├── RootSyncWorkflow
-│   ├── UserSyncWorkflow
-│   │   └── ResourceSyncWorkflow
-│   │       └── ResourcePagesWorkflow
-│   │           └── FilesPageWorkflow
-│   │               └── DocumentIngestionWorkflow
-│   └── FailedUserRemediationWorkflow
-└── DeactivateStoreWorkflow
-    ├── CleanupUsersWorkflow
-    └── RemoveObjectsWorkflow (bounded batches)
+└── RootSyncWorkflow
+    └── UserSyncWorkflow
+        └── ResourceSyncWorkflow
+            └── ResourcePagesWorkflow
+                └── FilesPageWorkflow
+                    └── DocumentIngestionWorkflow
 ```
 
-Provider bodies do not enter Workflow Event History. Workflows carry compact `DocumentRef`
-metadata; the ingestion Activity loads the staged body, validates and chunks it, then calls the
-repository. The Lakebase transaction locks the store row, verifies lifecycle state and generation,
-writes the document, chunks, and idempotency receipt, and commits them together.
+Document bodies do not enter Temporal Workflow Event History. Workflows carry small references;
+an Activity loads each body, verifies it, chunks it, and writes it to Lakebase.
 
-Deactivation is ordered `fence -> cancel -> drain -> bounded cleanup -> inactive`. The database
-first advances generation `N` to `N + 1` and enters `deactivating`. A generation-`N` Activity that
-finishes later is rejected by the database fence even if cancellation arrived too late.
+Each store row has a lifecycle state and a monotonically increasing **generation**. Deactivation
+commits `generation N → N + 1` before cancellation and cleanup. Every mutation checks the expected
+generation inside the same transaction as its write. A late generation-`N` Activity therefore
+fails even if cancellation arrived too late.
 
-See the [visual topology](docs/workflow-topology.md) for Task Queues, quota coordination, the
-Northstar late-writer sequence, and data ownership.
+See the [system specification](docs/lakebase-temporal-demo-spec.md) for the complete behavior and
+the [workflow topology](docs/workflow-topology.md) for diagrams.
+
+## Repository tour
+
+| Path | What it contains |
+|---|---|
+| `src/retrieval/temporal` | Temporal clients, workflows, Activities, worker, and runtime configuration |
+| `src/retrieval/lakebase` | Postgres connection pool, repository, search, migrations, and grants |
+| `src/retrieval/demo` | Northstar fixtures, scripted provider, durable controls/events, and demo service |
+| `apps/retrieval_demo` | FastAPI API, browser UI, and Databricks bundle |
+| `tests` | unit, contract, App, integration, replay, and load tests |
+| `docs` | architecture, deployment, migration, operations, and decision guides |
+| `Dockerfile.worker` | long-running worker image |
+| `Dockerfile.app` | standalone App image for tmprl-demo.cloud |
+
+Use the [implementation map](IMPLEMENTATION_MAP.md) when you need exact modules, commands,
+environment variables, workflow names, or database tables.
 
 ## Prerequisites
 
-- Python 3.11 or newer
-- [`uv`](https://docs.astral.sh/uv/)
-- [Temporal CLI](https://docs.temporal.io/cli) for local Temporal runs
-- for the full stack, a reachable TLS-enabled Lakebase/Postgres database
-- for Databricks bundle validation, Databricks CLI and an explicitly selected authenticated profile
+For local development you need:
 
-Install all development and demo dependencies:
+- Python 3.11 or newer;
+- [`uv`](https://docs.astral.sh/uv/);
+- Node.js for the JavaScript syntax check in `make verify`.
+
+Additional paths need:
+
+- Temporal CLI for a local Temporal server;
+- a TLS-enabled Lakebase/Postgres database for the complete stack;
+- Databricks CLI `>=0.299.0` and an OAuth profile for Databricks deployment;
+- Docker or another OCI builder for worker/App images.
+
+Install the locked development environment:
 
 ```bash
-uv sync --extra dev
+uv sync --frozen --extra dev
 ```
 
-## Fastest check: no services
+## Run the fastest rehearsal
 
-The headless rehearsal needs no Temporal server, Lakebase database, or network access:
+This command needs no database, Temporal server, or network connection:
 
 ```bash
 uv run retrieval-demo-headless --json
 ```
 
-It exercises the versioned Northstar fixtures, one five-second quota observation, four normal
-document commits at generation 7, a held fifth document, cited evidence retrieval, a `7 -> 8`
-fence, stale-writer rejection, bounded cleanup, and the final `inactive`/zero-row state. It is a
-data-plane rehearsal; it does not replace the Temporal integration suite or a live Lakebase check.
+A successful result ends with generation 8, state `inactive`, zero documents/chunks, four cited
+documents, and a rejected stale write. This validates the deterministic data-safety story; it does
+not validate a live Temporal or Lakebase environment.
 
-## Local Temporal smoke
+## Run a local Temporal smoke test
 
-Start the development server in one terminal:
+Start Temporal in one terminal:
 
 ```bash
 temporal server start-dev
 ```
 
-The frontend defaults to `localhost:7233` and Temporal Web normally opens at
-<http://localhost:8233>.
-
-In another terminal run the executable orchestration smoke test:
+Run the self-contained workflow starter in another terminal:
 
 ```bash
 uv run retrieval-test-starter
 ```
 
-The starter creates isolated queues and local workers, sends sync and deactivation through
-`RetrievalClient`, verifies the generation and final lifecycle state, and cleans up its controller.
-It uses an empty provider and in-memory persistence, so no separate `retrieval-worker` is needed.
+The starter creates temporary Task Queues and in-memory adapters, submits sync and deactivation
+through the public `RetrievalClient`, checks the final state, and cleans up. It does not need the
+deployed worker or Lakebase.
 
-## Full local Northstar stack
+## Run the complete demo locally
 
-This path runs the App and worker as separate processes against one Temporal namespace and one
-Lakebase/Postgres database.
+The complete demo uses four roles/processes:
 
-### 1. Configure the processes
+1. a Temporal server or namespace;
+2. a Lakebase/Postgres database owned by a migration identity;
+3. a long-running worker with a worker database role;
+4. the FastAPI App with a separate App database role.
 
-The executable worker, App, migration, and grant commands automatically load `.env` from the
-current working directory. Start with the complete, non-secret checklist and restrict the local
-copy because it can contain credentials:
+### 1. Create local configuration
+
+Copy the configuration checklist and protect it because it may contain credentials:
 
 ```bash
 cp .env.example .env
 chmod 600 .env
 ```
 
-Fill in the standard `PG*` values. For Lakebase OAuth, set the endpoint resource path and rely on
-normal Databricks SDK authentication:
+At minimum configure the canonical Postgres values and Temporal connection:
 
-```bash
-export PGHOST=<database-host>
-export PGPORT=5432
-export PGDATABASE=<database-name>
-export PGUSER=<database-role>
-export PGSSLMODE=require
-export LAKEBASE_ENDPOINT=projects/<PROJECT>/branches/<BRANCH>/endpoints/<ENDPOINT>
+```text
+PGHOST=<database-host>
+PGPORT=5432
+PGDATABASE=<database-name>
+PGUSER=<database-role-for-this-process>
+PGSSLMODE=require
 
-export TEMPORAL_ADDRESS=localhost:7233
-export TEMPORAL_NAMESPACE=default
-export TEMPORAL_TLS=false
-export RETRIEVAL_DEMO_MODE=true
+LAKEBASE_ENDPOINT=projects/<project>/branches/<branch>/endpoints/<endpoint>
+
+TEMPORAL_ADDRESS=<host:port>
+TEMPORAL_NAMESPACE=<namespace>
+TEMPORAL_TLS=<true-or-false>
+TEMPORAL_API_KEY=<required-for-Temporal-Cloud>
+
+RETRIEVAL_DEMO_MODE=true
+RETRIEVAL_SEARCH_BACKEND=postgres_text
 ```
 
-Environment injection is deliberately non-overriding: values already supplied by the shell,
-container platform, or Databricks resource/secret binding win over file values. Only the exact
-`.env` in the working directory is discovered; parent directories are not searched. To select a
-different file, set `RETRIEVAL_ENV_FILE`, for example:
+For Lakebase OAuth, set `LAKEBASE_ENDPOINT` and leave `PGPASSWORD` unset. For ordinary SSL
+Postgres, omit `LAKEBASE_ENDPOINT` and set `PGPASSWORD`. Never set both authentication methods.
 
-```bash
-RETRIEVAL_ENV_FILE=.env.worker uv run retrieval-worker
-```
+One `.env` is convenient for a private local rehearsal. To test least privilege, create separate
+ignored `.env.migration`, `.env.worker`, and `.env.app` files with the matching database identity.
+Select one with `RETRIEVAL_ENV_FILE=<path>`.
 
-An empty `RETRIEVAL_ENV_FILE` disables loading. An explicit path that is missing or is not a file
-fails at startup. `${NAME}` expressions remain literal rather than reading other process secrets.
-Library imports and direct config-object construction never load files.
+Executable entry points inspect only `.env` in the current directory unless
+`RETRIEVAL_ENV_FILE` is set. Existing process variables win, interpolation is disabled, and an
+empty `RETRIEVAL_ENV_FILE` disables file loading.
 
-The single `.env` is the shortest local path when one database identity is acceptable. For a
-least-privilege rehearsal, instead create ignored `.env.migration`, `.env.worker`, and `.env.app`
-files from the example, put the appropriate `PGUSER` and authentication in each, and restrict all
-three to mode `0600`:
+### 2. Create the schemas and grants
 
-```bash
-cp .env.example .env.migration
-cp .env.example .env.worker
-cp .env.example .env.app
-chmod 600 .env.migration .env.worker .env.app
-```
-
-The role-specific commands below select those files. If you chose the single `.env`, omit each
-`RETRIEVAL_ENV_FILE=...` prefix. Put shared Temporal settings in every role-specific file or inject
-them through the shell/secret manager. Never commit any of them.
-
-For an SSL-enabled local Postgres instance, omit `LAKEBASE_ENDPOINT` and set `PGPASSWORD` instead.
-Do not set both. Canonical `PG*` names take precedence over `LAKEBASE_HOST`, `LAKEBASE_PORT`,
-`LAKEBASE_DATABASE`, `LAKEBASE_USER`, `LAKEBASE_PASSWORD`, and `LAKEBASE_SSLMODE` aliases.
-
-### 2. Apply both schemas
-
-Run migrations with the migration identity, not the eventual App or worker identity:
+Run these commands with the migration owner:
 
 ```bash
 RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-migrate
 RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-demo-migrate
 RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-grant-roles \
-  --app-role <APP_DB_ROLE> --worker-role <WORKER_DB_ROLE>
+  --app-role <APP_DATABASE_ROLE> \
+  --worker-role <WORKER_DATABASE_ROLE>
+
 RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-migrate --check --json
 RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-demo-migrate --check --json
 ```
 
-Core migrations create `retrieval`; demo migrations create `retrieval_demo_ui` and the fixed
-`SECURITY DEFINER` run-seed function. Both schemas remain owned by the migration role. The grant
-command applies quoted, explicit steady-state privileges to already-existing distinct App and
-worker roles; it does not create roles. Review the exact grants in the
-[migration runbook](docs/runbooks/migration-and-rollback.md) before starting either process.
+Both checks must report `"ready": true`. The migration and grant model is explained in the
+[migration runbook](docs/runbooks/migration-and-rollback.md).
 
-### 3. Start the separate worker
-
-Leave Temporal running, then start the worker in its own terminal:
+### 3. Start the worker
 
 ```bash
-RETRIEVAL_ENV_FILE=.env.worker uv run retrieval-worker
+RETRIEVAL_ENV_FILE=.env.worker \
+RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle \
+uv run retrieval-worker
 ```
 
-The bundle shares one Lakebase connection pool across the repository, scripted provider controls,
-pre-commit hold hook, and durable demo event sink. It polls `retrieval-v2` and
-`retrieval-provider-v2`. Do not combine `RETRIEVAL_ADAPTER_BUNDLE_FACTORY` with the three individual
-factory variables or the unsafe in-memory flag.
+The worker polls `retrieval-v2` for workflows and database work, and
+`retrieval-provider-v2` for provider calls.
 
 ### 4. Start the App
-
-In another terminal, with App-role database credentials and the same Temporal settings:
 
 ```bash
 RETRIEVAL_ENV_FILE=.env.app uv run retrieval-demo-app
 ```
 
-Then verify and open it:
+Verify it:
 
 ```bash
 curl --fail http://127.0.0.1:8000/healthz
 curl --fail http://127.0.0.1:8000/readyz
 ```
 
-Open <http://127.0.0.1:8000>, create a run, sync it, ask the default question, deactivate it, and
-release the held write after the fence. `DATABRICKS_APP_PORT` overrides port 8000.
+Open <http://127.0.0.1:8000>. Create a run, synchronize it, inspect the cited answer, deactivate
+the store, and release the held write only after the generation fence appears.
 
-## Run a basic persistent worker
+The [App guide](apps/retrieval_demo/README.md) documents every endpoint and runtime dependency.
 
-For Temporal-only development without Lakebase or the Northstar scenario:
+## Test the project
 
-```bash
-RETRIEVAL_ALLOW_UNSAFE_IN_MEMORY_ADAPTERS=true uv run retrieval-worker
-```
-
-These adapters disappear when the process exits and the provider returns no data. Never enable
-this setting in a shared or deployed environment.
-
-## Test and validate
-
-Run the default unit, contract, App, Lakebase-adapter, demo, and replay tests:
+Run the standard verification sequence:
 
 ```bash
-uv run pytest
+make verify
 ```
 
-Run real Temporal scenarios using SDK-managed ephemeral servers:
+It runs linting, formatting checks, compilation, the default pytest suite, the headless rehearsal,
+JavaScript syntax validation, and package builds.
+
+Specialized suites are opt-in:
 
 ```bash
 make integration
-```
-
-Run replay and the opt-in synthetic load harness:
-
-```bash
 uv run pytest -m replay tests/replay
 RUN_TEMPORAL_LOAD=1 uv run pytest -s -m load tests/load
 ```
 
-Run static and packaging checks:
+Read the [integration](tests/integration/README.md), [replay](tests/replay/README.md), and
+[load](tests/load/README.md) guides before using an external namespace.
 
-```bash
-uv run ruff check .
-uv run ruff format --check .
-uv run python -m compileall -q src tests apps
-uv build
-docker build -f Dockerfile.worker -t temporal-retrieval-worker:local .
-```
+## Deploy the system
 
-Build the standalone web App image used by `tmprl-demo-cloud-registry`:
+The App and worker have different lifecycles:
 
-```bash
-docker build -f Dockerfile.app -t temporal-retrieval-app:local .
-```
+- deploy the App with `apps/retrieval_demo/databricks.yml` or the standalone App image;
+- deploy `Dockerfile.worker` on long-running compute with independent scaling and graceful
+  shutdown;
+- create the database schemas and explicit role grants before starting either runtime.
 
-`make verify` runs the non-Docker verification sequence, including the headless rehearsal; it
-requires `node` for the JavaScript syntax check. `make integration` and `make replay` wrap the
-corresponding opt-in suites.
+Use one of these runbooks:
 
-The Lakebase tests exercise SQL, migration, pool, repository, and search contracts with test
-doubles; they do not mutate a live target. A target Lakebase migration/readiness rehearsal remains
-environment-specific. Suite details: [integration](tests/integration/README.md),
-[replay](tests/replay/README.md), and [load](tests/load/README.md).
+- [Databricks App + external worker](docs/runbooks/deploy-lakebase-temporal-demo.md)
+- [tmprl-demo.cloud](docs/runbooks/deploy-tmprl-demo-cloud.md)
+- [Schema upgrades and rollback](docs/runbooks/migration-and-rollback.md)
 
-## Validate the Databricks App bundle without deploying
+Do not use an implicit Databricks profile, put credentials in command history, start child
+workflows directly, edit an applied migration, or decrement a committed store generation.
 
-The App bundle is rooted in `apps/retrieval_demo`. Always choose the workspace profile explicitly:
+## Documentation
 
-```bash
-cd apps/retrieval_demo
-databricks bundle validate --strict --profile <PROFILE> -t dev \
-  --var lakebase_branch=projects/<PROJECT>/branches/<BRANCH> \
-  --var lakebase_database=projects/<PROJECT>/branches/<BRANCH>/databases/<DATABASE> \
-  --var temporal_secret_scope=<SECRET_SCOPE>
-```
+The [documentation guide](docs/README.md) provides reading paths and a glossary. The most useful
+references are:
 
-This validates configuration only. It does not create, update, start, or deploy an App. The bundle
-binds the App to a `postgres` resource with `CAN_CONNECT_AND_CREATE` and reads Temporal address,
-namespace, and API key from three secret resources. The Temporal worker is intentionally absent
-from the App process and must be run from the separate container or another long-lived compute
-service.
-
-The bundle sync root includes the repository root because the effective `app.yaml`, pinned
-requirements, `apps` package, and `src/retrieval` package all live there. `.env` and `*.env` files
-are excluded from Git, Docker, and bundle source; the deployed App receives its environment only
-from Databricks resource, secret, and platform injection.
-
-Databricks maps `CAN_CONNECT_AND_CREATE` to database `CONNECT` and `CREATE` for the App service
-principal. The repository's grant command narrows table, schema-object, and function access, but it
-does not remove that database-level platform grant. Use a dedicated database as the App's security
-boundary, verify the effective privilege before rollout, and see the migration runbook if policy
-requires revoking database `CREATE` after resource binding.
-
-## Production use
-
-The Northstar fixture provider and fixture staging store are demonstration components, not customer
-connectors. A production system must provide a durable staging adapter and real provider gateway,
-prove its target database and Temporal compatibility, configure telemetry and high availability,
-and complete the release gates in
-[`docs/architecture-production-readiness.md`](docs/architecture-production-readiness.md).
-
-For non-demo production adapters, either configure one typed bundle:
-
-```text
-RETRIEVAL_ADAPTER_BUNDLE_FACTORY=package.module:create_adapter_bundle
-```
-
-or configure all three legacy factories together:
-
-```text
-RETRIEVAL_REPOSITORY_FACTORY=package.module:create_repository
-RETRIEVAL_STAGING_STORE_FACTORY=package.module:create_staging_store
-RETRIEVAL_PROVIDER_GATEWAY_FACTORY=package.module:create_provider_gateway
-```
-
-The worker fails closed on missing, partial, or ambiguous adapter configuration.
+- [System specification](docs/lakebase-temporal-demo-spec.md)
+- [Workflow and data topology](docs/workflow-topology.md)
+- [Implementation map](IMPLEMENTATION_MAP.md)
+- [Production-readiness guide](docs/architecture-production-readiness.md)
+- [Metrics and observability](docs/operations/metrics.md)

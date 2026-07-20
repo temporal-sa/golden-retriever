@@ -1,139 +1,146 @@
-# Metrics, events, dashboards, and alerts
+# Metrics and observability
 
-The code creates a bounded set of Temporal SDK metric instruments. `retrieval-worker` does not
-configure a metrics exporter. A deployment must construct an OpenTelemetry- or Prometheus-enabled
-Temporal SDK runtime before `Client.connect`, then verify the exported names and labels in its own
-backend.
+This page explains which operational signals the code emits, which signals must come from Temporal,
+Lakebase, or the App platform, and how to turn them into dashboards and alerts.
 
-The SDK runtime commonly prefixes instruments with `temporal_`; Prometheus translation can also
-add counter and unit suffixes. The names below are the application base names, not a promise about
-the final exporter spelling.
+The worker creates Temporal SDK metric instruments but does not configure an exporter. A deployment
+must supply an OpenTelemetry- or Prometheus-enabled Temporal runtime before `Client.connect` and
+verify the final exported names in its backend.
 
-## Implemented application metrics
+## How to read metric names
 
-Workflow metrics use replay-aware `workflow.metric_meter`. Activity metrics use
-`activity.metric_meter`. Emission is fail-open: a telemetry failure never changes workflow or
+The table below lists application **base names**. Temporal SDK runtimes commonly add a
+`temporal_` prefix; Prometheus translation may also add counter or unit suffixes. Confirm the actual
+names and units after configuring the target exporter.
+
+Workflow code emits through replay-aware `workflow.metric_meter`. Activities emit through
+`activity.metric_meter`. Emission is fail-open: a telemetry failure does not change workflow or
 Activity behavior.
 
-| Base instrument | Type | Meaning |
+## Application metrics implemented in code
+
+| Base name | Type | Meaning |
 |---|---|---|
-| `retrieval_quota_permit_requests` | Counter | Permit requests by accepted/denied/ignored outcome |
-| `retrieval_quota_permits_granted` | Counter | Permits granted |
-| `retrieval_quota_grant_signal_failures` | Counter | Failed grant Signal delivery |
-| `retrieval_quota_pending_requests` | Gauge | Pending permits in a quota coordinator |
-| `retrieval_quota_in_flight` | Gauge | Reserved or active permits |
-| `retrieval_quota_scope_blocked` | Gauge | Authoritative quota-blocked state, 0 or 1 |
-| `retrieval_quota_wait_duration_ms` | Histogram | Permit request-to-grant latency |
-| `retrieval_provider_requests` | Counter | Provider Activity calls by operation and outcome |
-| `retrieval_provider_quota_exhausted` | Counter | Structured provider quota-exhaustion observations |
-| `retrieval_lifecycle_transitions` | Counter | Lifecycle transition attempts/outcomes |
-| `retrieval_stale_generation_rejections` | Counter | Mutations rejected by a generation fence |
-| `retrieval_document_ingestion_results` | Counter | Document Activity result status |
-| `retrieval_deactivation_drain_duration_ms` | Histogram | Owned-operation drain latency and timeout status |
+| `retrieval_quota_permit_requests` | counter | Permit requests by accepted/denied/ignored outcome |
+| `retrieval_quota_permits_granted` | counter | Permits granted |
+| `retrieval_quota_grant_signal_failures` | counter | Failed grant Signal delivery |
+| `retrieval_quota_pending_requests` | gauge | Pending permits in a quota coordinator |
+| `retrieval_quota_in_flight` | gauge | Reserved or active permits |
+| `retrieval_quota_scope_blocked` | gauge | Quota-blocked state, 0 or 1 |
+| `retrieval_quota_wait_duration_ms` | histogram | Permit request-to-grant latency |
+| `retrieval_provider_requests` | counter | Provider calls by operation/outcome |
+| `retrieval_provider_quota_exhausted` | counter | Structured provider quota observations |
+| `retrieval_lifecycle_transitions` | counter | Lifecycle transition attempts/outcomes |
+| `retrieval_stale_generation_rejections` | counter | Mutations rejected by a generation fence |
+| `retrieval_document_ingestion_results` | counter | Document Activity result status |
+| `retrieval_deactivation_drain_duration_ms` | histogram | Owned-work drain latency/timeout status |
 
-Allowed application attributes are limited to `mutation`, `operation`, `provider`, `quota_class`,
-`reason`, `status`, `transition`, and `work_class`. Unknown keys are dropped and values larger than
-64 UTF-8 bytes collapse to `other`. Store, user, credential, cursor, request, operation, run,
-workflow, and idempotency identities are intentionally excluded.
+Allowed attributes are limited to `mutation`, `operation`, `provider`, `quota_class`, `reason`,
+`status`, `transition`, and `work_class`. Unknown keys are dropped; values larger than 64 UTF-8
+bytes become `other`.
 
-## Signals that are not application metrics
+Store, user, credential, cursor, request, run, workflow, operation, and idempotency identities are
+deliberately excluded to prevent high cardinality and sensitive labels.
 
-The following are present as state, events, logs, or target-platform telemetry—not as instruments
-created by this repository:
+## Signals supplied elsewhere
 
-| Signal | Available source |
+Not every observable fact is an application metric:
+
+| Signal | Authoritative source |
 |---|---|
-| Lakebase connection health | `/readyz` and Lakebase/Postgres service telemetry |
-| Core/demo migration readiness | `/readyz` and the two migration `--check --json` commands |
-| Database transaction/pool latency | Lakebase/Postgres monitoring only |
-| Search latency/hit count | request logs or external HTTP tracing only |
-| Idempotency duplicate/conflict count | durable receipts plus application logs only |
-| Cleanup documents/chunks per batch | workflow result and Northstar `demo_events` only |
-| Northstar quota/hold/fence/stale/cleanup timeline | `retrieval_demo_ui.demo_events` and App API |
-| App request rate/latency | hosting/runtime HTTP telemetry only |
+| App process liveness | `/healthz` and App platform status |
+| Lakebase/Temporal readiness | `/readyz` |
+| Migration readiness/checksum drift | both migration `--check --json` commands |
+| Database pool, transaction, lock, and query latency | Lakebase/Postgres telemetry |
+| Search latency and HTTP request rate | App hosting/tracing telemetry |
+| Duplicate/conflicting HTTP requests | durable receipts and structured application logs |
+| Cleanup documents/chunks per batch | workflow result and Northstar events |
+| Northstar quota/hold/fence/stale/cleanup story | `retrieval_demo_ui.demo_events` |
+| Worker pollers, slots, task latency, failures | Temporal SDK/Core metrics |
+| Workflow state and open executions | Temporal visibility |
 
-Cleanup batch document/chunk totals are best-effort audit counts. A lost Activity completion can
-cause a retry to delete the next bounded batch, so the workflow's cumulative total can undercount
-even though generation fencing and the final database state remain correct. Use the authoritative
-terminal invariant—zero documents, chunks, users, and retrieval state—rather than those totals for
-completion or compliance gates.
+`demo_events` is a bounded presentation/audit stream, not a monitoring time series. Do not scrape
+it as a high-volume metrics backend.
 
-Do not create dashboards that query nonexistent application instruments such as
-`retrieval_db_transaction_total`, `retrieval_db_pool_in_use`, or
-`retrieval_search_duration_ms`. Add and test those instruments in code before depending on them.
+Cleanup counts are best-effort audit totals. If an Activity deletes a batch but its completion is
+lost, a retry may delete the next batch and the workflow cumulative count may undercount. The
+authoritative completion condition is zero remaining users, retrieval state, documents, and
+chunks.
 
-`demo_events` is a presentation/audit stream with deduplicated event keys and bounded JSON details.
-It is not a monitoring time series and should not be scraped as a high-volume metrics backend.
+Do not build dashboards around nonexistent names such as `retrieval_db_transaction_total`,
+`retrieval_db_pool_in_use`, or `retrieval_search_duration_ms`. Add and test those instruments in
+code first.
 
-## Temporal SDK/Core metrics
+## Temporal SDK/Core metrics to enable
 
-Use SDK/Core metrics for worker and Task Queue health, including:
+Export SDK/Core signals for both Task Queues:
 
-- Activity and Workflow Task schedule-to-start latency;
-- Activity execution, Workflow Task execution, and replay latency;
-- available/used worker task slots and poller counts;
-- poll success/empty results and workflow completion/failure counters.
+- Workflow and Activity Task schedule-to-start latency;
+- Workflow Task execution, Activity execution, and replay latency;
+- available/used worker task slots;
+- poller counts, poll successes, and empty polls;
+- workflow completion/failure and task-failure counters;
+- Worker Deployment/build identity where the backend supports it.
 
-The opt-in load harness also measures selected Workflow History event/byte counts, Signal resume
-latency, Activity schedule-to-start latency, and synthetic fairness. It is a test report, not a
-continuous collector.
+The load harness reports selected Event History event/byte counts, Signal resume latency, Activity
+schedule-to-start latency, and synthetic fairness. It is a test report rather than a continuous
+collector.
 
-## Coverage matrix
+## Coverage and known gaps
 
-| Operational need | Status |
+| Operational need | Coverage |
 |---|---|
-| Provider request outcomes and quota exhaustion | Implemented application counters |
-| Pending/in-flight/blocked quota state and wait time | Implemented gauges/histogram |
-| Lifecycle transition and stale-writer outcomes | Implemented counters |
-| Document ingestion outcomes | Implemented counter |
-| Deactivation drain duration/timeout | Implemented histogram |
-| Worker slots, pollers, and schedule-to-start | Available from SDK when exporter is configured |
-| Active store sync/remediation totals | Not instrumented |
-| Sync-cancellation latency | Not instrumented |
-| Complete deactivation failure counter | Not instrumented; infer only with external workflow visibility |
-| Continuous Workflow History size | Not instrumented; load harness is point-in-time |
-| Lakebase pool/transaction/search/cleanup batch metrics | Not instrumented by this code |
-| Dashboards, exporters, thresholds, and paging routes | Not provisioned by this repository |
+| Provider outcomes and quota exhaustion | application counters |
+| Pending/in-flight/blocked quota and wait latency | application gauges/histogram |
+| Lifecycle transitions and stale writers | application counters |
+| Ingestion outcomes | application counter |
+| Deactivation drain duration/timeouts | application histogram |
+| Pollers, slots, task schedule-to-start | Temporal SDK/Core after exporter setup |
+| Active sync/remediation totals | not instrumented |
+| Sync cancellation latency | not instrumented |
+| Complete deactivation failure count | use Temporal visibility until instrumented |
+| Continuous Event History size | not instrumented; load harness is point-in-time |
+| Lakebase pool/transaction/search metrics | use database telemetry |
+| Exporters, dashboards, thresholds, paging | deployment responsibility |
 
-These gaps are production launch gates, not missing Northstar demo functionality. The App displays
-authoritative state and durable demo events without requiring these metrics.
+These gaps do not block the deterministic demo, but they are production-readiness gates.
 
-## Recommended dashboard views
+## Recommended dashboards
 
-After configuring an exporter, build views by namespace, Task Queue, deployment/build, provider,
-quota class, operation, and bounded status where available:
+Build views by namespace, Task Queue, Worker Deployment/build, provider, quota class, operation,
+and bounded status. Avoid customer identifiers.
 
-1. **Worker health:** pollers, slots, Task failures, poll results, and schedule-to-start percentiles
+1. **Worker health:** pollers, slots, task failures, poll results, and schedule-to-start percentiles
    for both queues.
-2. **Provider/quota:** provider outcomes, exhaustion, pending/in-flight permits, blocked scopes,
+2. **Provider and quota:** provider outcomes, exhaustion, pending/in-flight permits, blocked scopes,
    grant failures, and wait percentiles.
-3. **Lifecycle safety:** transitions, stale-generation rejections, ingestion outcomes, and
+3. **Lifecycle safety:** transition outcomes, stale-generation rejections, ingestion outcomes, and
    deactivation drain percentiles/timeouts.
-4. **Database/App:** use Lakebase and hosting-native telemetry for connections, transaction/query
-   latency, HTTP error rate, and readiness failures.
-5. **History/capacity:** external visibility or periodic measurement for history growth,
-   Continue-As-New, pending tasks, execution duration, and throughput.
+4. **Database and App:** Lakebase connections/query latency, HTTP traffic/errors, and readiness
+   failures from platform telemetry.
+5. **History and capacity:** open executions, history growth, Continue-As-New, pending tasks,
+   duration, and throughput.
 
 ## Alert candidates
 
-Set thresholds from production-like measurements and named SLOs. Useful conditions include:
+Choose thresholds from production-like tests and named SLOs. Useful conditions include:
 
-- no healthy pollers or sustained slot exhaustion on either Task Queue;
-- schedule-to-start latency above its SLO;
-- quota remaining blocked or pending after its authoritative reset;
-- grant Signal failures or provider authentication failures;
+- no healthy poller on either Task Queue;
+- sustained worker slot exhaustion or schedule-to-start latency above SLO;
+- quota still blocked/pending after its authoritative reset;
+- grant Signal failure or provider authentication failure;
 - elevated ingestion failures or unexpected stale-generation rejection rate;
-- deactivation drain timeout or end-to-end completion beyond its SLA;
-- App readiness failure, Lakebase connection saturation, or migration drift;
-- Workflow History approaching target limits;
+- deactivation drain timeout or completion beyond SLA;
+- App readiness failure, migration drift, or Lakebase connection saturation;
+- Event History approaching a reviewed namespace limit;
 - unexpected starts of optional drain-only Workflow Types.
 
-Exercise every alert against the actual exporter and paging route. Include a build/deployment
-identity and runbook link without exposing high-cardinality customer identifiers.
+Every page must include build/deployment identity and a runbook link without exposing high-cardinality
+customer data. Exercise the real alert rule, exporter, routing, and paging destination before
+launch.
 
-## Local validation boundary
+## Validation boundary
 
-Unit/integration/load tests verify selected emitters and measurement helpers in controlled runs.
-They do not configure durable telemetry, create dashboards, select thresholds, or test a target
-paging system. Those actions remain part of the
-[`production-readiness guide`](../architecture-production-readiness.md).
+Unit, integration, and load tests validate selected emitters and helpers. They do not configure a
+durable exporter, create dashboards, choose thresholds, or test paging. Those actions belong to
+the target environment and the [production-readiness gate](../architecture-production-readiness.md).

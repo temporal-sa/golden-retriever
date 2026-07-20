@@ -1,176 +1,192 @@
-# Deployment and production readiness
+# Production-readiness guide
 
-This page distinguishes two different claims:
+This guide explains the evidence required to move from source code to a controlled demo and then
+to a customer-facing service. It does not declare any environment production-ready; readiness is a
+property of a specific build, database, Temporal namespace, identities, network, and operating
+team.
 
-- **deployable demo artifacts:** source, migrations, manifests, worker image, deterministic fixtures,
-  App, and validation commands are present;
-- **production launch readiness:** a specific target has passed identity, compatibility, telemetry,
-  high-availability, security, recovery, and capacity gates.
+If you are new to the system, read the [system specification](lakebase-temporal-demo-spec.md)
+before using these gates.
 
-The first claim applies to this repository. The second is environment-specific and has not been
-established. No Databricks App, Lakebase database, or Temporal worker was deployed while preparing
-this repository.
+## Three levels of evidence
 
-## What is built
-
-| Capability | Repository implementation |
+| Level | What it proves |
 |---|---|
-| Store command authority | `StoreControllerWorkflow` with Update-with-Start client commands |
+| Source verification | The code, deterministic demo, packages, and selected Temporal histories pass locally |
+| Controlled-demo readiness | One named cloud environment can run the five-document Northstar scenario safely |
+| Production readiness | Real adapters, target capacity, HA, telemetry, security, recovery, and release controls are proven |
+
+Passing a lower level never implies the next level.
+
+## Capabilities supplied by the repository
+
+| Capability | Implementation |
+|---|---|
+| Store command authority | `StoreControllerWorkflow` and Update-with-Start client commands |
 | Retrieval orchestration | Bounded user/resource/page/document workflow hierarchy |
-| Provider admission | Shared durable `UserQuotaWorkflow`, structured quota observations, bounded queue |
-| Durable persistence | Async Lakebase/Postgres repository and OAuth-aware connection pool |
-| Mutation safety | Same-transaction lifecycle generation checks and durable write receipts |
-| Deactivation | Fence, cancel, drain, user cleanup, bounded object cleanup, inactive precondition |
+| Provider admission | Shared durable quota workflow with bounded pending state |
+| Persistence | Async Lakebase/Postgres repository and OAuth-aware connection pool |
+| Mutation safety | Same-transaction generation checks and durable receipts |
+| Deactivation | Fence, cancel, drain, user cleanup, bounded object cleanup, zero-row finish |
 | Retrieval | Deterministic chunking and current-generation Postgres full-text search |
-| Demo provider/staging | Manifest-checked Northstar fixtures and cross-process scripted controls |
-| Control plane | FastAPI JSON API, durable HTTP idempotency, static UI, health/readiness |
-| Packaging | Databricks App DAB/root manifest and separate worker Dockerfile |
-| Change safety | Unit/contract/App/demo tests, Temporal integration harness, checked-in replay histories |
+| Demo adapters | Manifest-verified fixtures and scripted quota/hold controls |
+| App | FastAPI API, durable HTTP idempotency, browser UI, liveness/readiness |
+| Packaging | Databricks Asset Bundle, App image, and separate worker image |
+| Change safety | Unit/contract/App/demo tests, integration harness, and replay histories |
 
-The Northstar components are a controlled demonstration, not a customer-data connector. The
-packaged fixtures replace a durable object store and the scripted provider replaces a real
-provider API.
+Northstar fixtures replace a durable object store and real provider. They prove the orchestration
+and safety story, not production data integration.
 
-## Demo deployment gate
+## Source verification gate
 
-A target is eligible for a controlled demonstration only when all of these are verified there:
+Run the exact revision and dependency lock intended for release:
 
-- [ ] A dedicated Lakebase branch/database and explicit migration, App, and worker identities
-      exist.
-- [ ] Core and demo migration CLIs report ready with no checksum drift.
-- [ ] `retrieval-lakebase-grant-roles` has applied the reviewed App/worker grants.
-- [ ] The App role can read core state/search, use demo DML, and execute only the fixed seed
-      function; it cannot mutate core retrieval tables directly.
-- [ ] The worker role can perform core DML and only the required demo control/event operations.
-- [ ] The App bundle validates with an explicitly selected authenticated workspace profile and
-      target variables.
-- [ ] The independently built worker image connects and both Task Queues show pollers.
-- [ ] `/healthz` and `/readyz` pass using the deployed App identity and target Temporal namespace.
-- [ ] A fresh run completes quota wait, cited retrieval, `7 -> 8` fence, stale-writer rejection,
-      bounded cleanup, and final zero-row state.
-- [ ] Temporal Web links, outbound network rules, secret references, and log redaction have been
+```bash
+make verify
+make integration
+uv run pytest -m replay tests/replay
+docker build -f Dockerfile.worker -t retrieval-worker:<build-id> .
+```
+
+Archive the source revision, `uv.lock`, test output, replay inventory, package hashes, image digest,
+and build identity. Record skipped/opt-in scenarios explicitly.
+
+## Controlled-demo gate
+
+A named environment is suitable for the packaged Northstar demonstration only after every item is
+verified there:
+
+- [ ] A dedicated Lakebase branch/database exists.
+- [ ] Migration owner, App role, and worker role are distinct and recorded.
+- [ ] Both migration checks report `ready: true` with no checksum drift.
+- [ ] Reviewed App/worker grants are applied and negative privilege tests pass.
+- [ ] The Databricks bundle validates with an explicit OAuth profile and target variables.
+- [ ] The App contains the expected Lakebase and three Temporal secret bindings.
+- [ ] The worker image has an immutable build identity and polls both Task Queues.
+- [ ] `/healthz` and `/readyz` return 200 through the deployed App identity.
+- [ ] A fresh run observes quota wait/resume, four citations, the `7 → 8` fence, stale-writer
+      rejection, bounded cleanup, and final zero-row state.
+- [ ] Secrets, network egress, log redaction, App permissions, and optional Temporal Web links are
       checked from the presentation environment.
 
-Local unit/contract tests and DAB schema validation are valuable build evidence, but they do not
-satisfy these live checks.
+Use the [deployment runbook](runbooks/deploy-lakebase-temporal-demo.md) for the ordered procedure.
 
-## Production launch gates
+## Production adapters and data lifecycle
 
-A customer-facing launch adds the following requirements beyond the controlled demo.
+Replace demo adapters with implementations that prove these contracts:
 
-### Real adapters and data lifecycle
-
-Replace the fixture staging store and scripted provider with implementations that prove:
-
-| Boundary | Production evidence |
+| Boundary | Required evidence |
 |---|---|
-| `StagingStore` | durable body availability, encryption, integrity validation, retention/deletion, retry behavior |
-| `ProviderGateway` | authorization, secret rotation, stable pagination, timeouts, cancellation, structured 429/reset mapping |
-| `RetrievalRepository` | contract and race tests on the exact target database/configuration, backup/restore, retention for receipts/events |
+| `StagingStore` | durable availability, encryption, hash/integrity verification, retention/deletion, retries |
+| `ProviderGateway` | authorization, secret rotation, stable pagination, timeout/cancellation, structured quota mapping |
+| `RetrievalRepository` | target-database contract/race tests, idempotency, backup/restore, receipt/event retention |
 
-Use either one typed `RETRIEVAL_ADAPTER_BUNDLE_FACTORY` or all three individual factories. Never
-enable `RETRIEVAL_ALLOW_UNSAFE_IN_MEMORY_ADAPTERS` in a shared environment.
+Configure either one typed `RETRIEVAL_ADAPTER_BUNDLE_FACTORY` or all three individual factories.
+Never enable `RETRIEVAL_ALLOW_UNSAFE_IN_MEMORY_ADAPTERS` in shared or customer environments.
 
-### Temporal compatibility
+Define how source deletions, access revocation, retention expiration, legal holds, and failed
+partial syncs propagate through staging, retrieval data, backups, and provider credentials.
 
-Verify in the selected namespace:
+## Temporal compatibility gate
 
-- Update-with-Start and the SDK/server versions used by the build;
-- namespace retention, payload, history, rate, and concurrent-operation limits;
+Verify against the selected namespace and SDK/server versions:
+
+- Update-with-Start support and behavior;
+- namespace retention and payload/history/rate/concurrency limits;
 - deployment-based Worker Versioning before enabling it;
-- typed Search Attribute registration before enabling application attributes;
-- Task Queue Priority/Fairness before asserting server support.
+- Search Attribute registration before enabling application attributes;
+- Task Queue Priority/Fairness before asserting server support;
+- authorization for the exact namespace and Task Queues.
 
-Replay representative histories for every affected Workflow Type and path: long-running, signaled,
-canceled, failed, retried, patched, and Continue-As-New. Checked-in local histories prove the
-replay harness and specific compatibility branches; they are not a sample of another namespace.
+Replay representative histories for every affected Workflow Type and path: long-running,
+signaled, canceled, failed, retried, patched, and Continue-As-New. Checked-in histories prove only
+their exact paths. Keep open executions routed to a compatible build.
 
-Keep open executions pinned to a compatible worker. Optional drain-only workflow placeholders
-cannot substitute for an absent historical implementation.
+Optional drain-only workflow names cannot replace a missing historical implementation.
 
-### High availability and capacity
+## Availability and capacity gate
 
-One `retrieval-worker` process starts both retrieval and provider pollers. Run at least two
-independently scheduled replicas for every live build, distributed across failure domains. Use
-graceful shutdown with at least a 60-second orchestrator termination window, and confirm both
-queues have pollers before admitting work.
+One worker process polls both queues. For a live service, run at least two independently scheduled
+replicas of every build receiving work, distribute them across failure domains, and allow at least
+60 seconds for graceful termination.
 
-Measure with production adapters and realistic stores:
+Measure with production adapters and representative stores:
 
-- Workflow and Activity schedule-to-start latency;
-- provider quota wait/reset recovery and authentication failure behavior;
-- event-history count/bytes and Continue-As-New frequency;
-- concurrent children, Activities, Signals, and quota requests;
-- database pool/transaction/search latency from target monitoring;
-- cleanup batch throughput, deactivation drain time, and end-to-end completion;
-- throughput and fairness at expected users, resources, pages, and documents.
+- Workflow/Activity schedule-to-start and end-to-end latency;
+- provider quota waits, reset recovery, and authentication failures;
+- Event History count/bytes and Continue-As-New frequency;
+- concurrent children, Activities, Signals, and permit requests;
+- database connection, transaction, lock, and search latency;
+- cleanup throughput and deactivation drain/completion time;
+- throughput and fairness across realistic users/resources/pages/documents.
 
-The included load harness measures selected Temporal mechanics. It does not establish capacity,
-database SLOs, or a production maximum.
+The synthetic load harness validates its measurement machinery. It is not a production capacity
+result.
 
-### Telemetry and incident response
+## Observability and incident-response gate
 
-The worker creates application metric instruments but does not configure an exporter. The host must
-construct an OpenTelemetry- or Prometheus-enabled Temporal SDK runtime, provision dashboards and
-alerts, and exercise paging routes. The exact implemented metrics and missing signals are listed in
-[`operations/metrics.md`](operations/metrics.md).
+The code creates application metric instruments but does not configure an exporter. The runtime
+owner must provide an OpenTelemetry- or Prometheus-enabled Temporal runtime, dashboards, alerts,
+and exercised paging routes. See [metrics and observability](operations/metrics.md).
 
-Do not infer database transaction, pool, search, or cleanup-batch metrics from the presence of the
-Lakebase adapter; this repository has not instrumented those as application metrics. Use target
-database telemetry until explicit instruments are added.
+Use Lakebase and App platform telemetry for database and HTTP signals that are not instrumented by
+this code. Define structured logging, correlation, retention, and redaction. Never log credentials,
+document bodies, raw idempotency keys, or clear-text connection strings.
 
-Define structured logging, correlation, and redaction rules. Workflow IDs and hashed identities may
-be logged where policy permits; credentials, document bodies, raw idempotency keys, and clear-text
-connection strings may not.
+Before launch, assign owners for:
 
-### Security and recovery
+- App, worker, Temporal namespace, Lakebase, and provider incidents;
+- SLOs, alert thresholds, paging, and escalation;
+- rollout stop authority and rollback execution;
+- migration approval and database recovery;
+- security incident and secret-rotation procedures.
 
-The deploying organization must review and rehearse:
+## Security and recovery gate
 
-- resolution of the worker's versioned base-image tags to approved immutable digests for the
-  release build;
-- least-privilege database grants and role rotation, including the effective database `CREATE`
-  privilege implied by the Databricks App `CAN_CONNECT_AND_CREATE` resource binding;
-- Temporal namespace and Task Queue authorization;
-- Databricks secret scope policy and outbound network controls;
+Review and rehearse:
+
+- immutable base-image and application dependency provenance;
+- least-privilege App/worker grants and service-principal rotation;
+- the database-level `CREATE` implied by App `CAN_CONNECT_AND_CREATE`;
+- Temporal and Databricks authorization boundaries;
+- secret-scope policy and outbound network controls;
 - payload codec/encryption requirements;
 - Lakebase backup, point-in-time recovery, and branch lifecycle;
-- Temporal disaster recovery and retention;
-- fixture/demo endpoint disabling outside controlled environments;
-- SLOs, paging, rollback authority, and incident ownership.
+- Temporal retention/disaster recovery;
+- disabling demo endpoints/adapters outside controlled environments;
+- recovery when App, worker, Temporal, provider, or database is partially unavailable.
 
-## Search visibility
+## Search visibility limitations
 
-When `TEMPORAL_ENABLE_SEARCH_ATTRIBUTES=true`, workflow starts can attach the typed attributes in
-`retrieval.temporal.common.search_attributes`. Namespace registration is external. `CurrentPhase`
-is populated at start and terminal `ResultStatus`/continuous phase upserts are not implemented, so
-do not build operational gates that assume those fields remain current. The App's authoritative
-store state comes from Lakebase, not Temporal visibility.
+Lakebase is the authoritative lifecycle source. Search SQL joins the current store generation and
+readable state, so stale/deactivating content is hidden.
 
-## Production canary checklist
+When `TEMPORAL_ENABLE_SEARCH_ATTRIBUTES=true`, workflows may attach registered typed attributes.
+`CurrentPhase` is set at start, but continuous phase/result upserts are not implemented. Do not
+build operational gates that assume Temporal visibility mirrors the latest database state.
 
-A production build is eligible for canary only when:
+## Production canary gate
 
-- [ ] real provider and staging adapters are packaged and contract-tested;
-- [ ] the exact Lakebase target passes mutation, idempotency, cleanup, search, and race tests;
-- [ ] representative histories replay on every build that may receive tasks;
-- [ ] namespace features, limits, retention, and Search Attributes are verified;
-- [ ] immutable build identity and Worker Versioning routing are tested;
-- [ ] at least two healthy replicas poll both queues for every live build;
-- [ ] runtime metrics export, dashboards, alerts, and paging are exercised;
-- [ ] production-like integration/load results meet named SLO thresholds;
-- [ ] backup/restore, secret rotation, disaster recovery, and rollback are rehearsed;
-- [ ] canary ownership and stop/rollback thresholds are documented.
+- [ ] Real provider and staging adapters are packaged and contract-tested.
+- [ ] The exact Lakebase target passes mutation, idempotency, cleanup, search, and race tests.
+- [ ] Required histories replay on every build that may receive tasks.
+- [ ] Namespace features, limits, retention, and Search Attributes are recorded.
+- [ ] Immutable build identity and Worker Versioning routing are rehearsed.
+- [ ] At least two healthy replicas poll both Task Queues for each live build.
+- [ ] Exporters, dashboards, alerts, and paging routes are exercised.
+- [ ] Representative integration/load results meet named SLO thresholds.
+- [ ] Backup/restore, secret rotation, disaster recovery, and rollback are rehearsed.
+- [ ] Canary ownership, duration, stop thresholds, and expansion criteria are approved.
 
-## Non-negotiable rollback rules
+## Rollback rules that cannot be waived
 
 - Never route an open execution to workflow code that cannot replay its history.
 - Never decrement a committed lifecycle generation.
-- Resume a post-fence failed deactivation with the same generation and stable identity.
-- Never refund a provider permit after an ambiguous call; wait for an authoritative observation or
+- Resume post-fence deactivation cleanup with the same generation and stable identity.
+- Never refund provider capacity after an ambiguous call; wait for an authoritative observation or
   reset.
-- Keep compatible workers available until visibility confirms their executions have drained.
+- Keep compatible workers available until their assigned executions have drained.
+- Never edit an applied migration or its checksum; correct forward or restore an approved database
+  recovery point.
 
-Operational order and SQL grants are in
-[`runbooks/migration-and-rollback.md`](runbooks/migration-and-rollback.md). Recorded local evidence
-is in [`artifacts/verification-2026-07-18.md`](../artifacts/verification-2026-07-18.md).
+Operational commands are in the [migration and rollback runbook](runbooks/migration-and-rollback.md).
