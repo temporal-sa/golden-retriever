@@ -155,6 +155,9 @@ class DemoSearchHit:
     text: str
     score: float
     source_uri: str | None = None
+    committed_generation: int | None = None
+    keyword_rank: int | None = None
+    vector_rank: int | None = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +188,7 @@ class DemoSnapshot:
     controller: Mapping[str, Any] | None = None
     temporal_available: bool = True
     temporal_warning: str | None = None
+    story_state: str = "ready"
 
 
 @dataclass(frozen=True)
@@ -193,6 +197,8 @@ class DemoReadiness:
     database_ready: bool
     temporal_ready: bool
     migrations_ready: bool
+    search_ready: bool = True
+    embeddings_ready: bool = True
     details: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

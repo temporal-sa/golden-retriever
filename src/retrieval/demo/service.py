@@ -5,15 +5,17 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from temporalio.exceptions import ApplicationError
 
+from retrieval.temporal.activities.provider_api import ProviderPreflightRequest
 from retrieval.temporal.activities.repositories import (
     InMemoryRetrievalRepository,
     RetrievalRepository,
@@ -60,8 +62,6 @@ from .store import DemoStateStore, PostgresDemoStateStore
 _RUN_NAMESPACE = uuid.UUID("dbde145b-0721-4b44-8595-7d26d75b82c6")
 _OPERATION_NAMESPACE = uuid.UUID("e70d7b93-6988-4fcf-965d-5106dc45b4f5")
 _TOKEN = re.compile(r"[a-z0-9]+")
-_FIXED_QUESTION = "what should the account team prioritize before northstar's renewal?"
-_EVIDENCE_QUERY = '"September 30" OR "August 15" OR "EU residency" OR SCIM OR Aisha OR champion'
 _CONTROLLER_CONFLICT_TYPES = frozenset(
     {
         "RemediationAlreadyRunning",
@@ -104,14 +104,14 @@ class RepositoryStoreCreationBoundary:
 
 
 class PostgresNorthstarStoreCreationBoundary:
-    """Least-privilege App boundary backed by the fixed SECURITY DEFINER function."""
+    """Least-privilege App boundary backed by the constrained demo seed function."""
 
     def __init__(self, state_store: PostgresDemoStateStore) -> None:
         self._state_store = state_store
 
     async def create(self, run: DemoRun, controls: DemoControls) -> DemoRun:
         # PostgresDemoStateStore invokes the migration-owned, fixed-purpose
-        # retrieval_demo_ui.create_northstar_run SECURITY DEFINER function.
+        # retrieval_demo_ui.create_demo_run SECURITY DEFINER function.
         return await self._state_store.create_run(run, controls)
 
 
@@ -133,6 +133,10 @@ class DemoCommandGateway(Protocol):
         store_key: str,
         operation_id: str,
     ) -> CommandResult | None: ...
+
+    async def start_preflight(self, request: ProviderPreflightRequest) -> str: ...
+
+    async def get_preflight(self, workflow_id: str) -> Mapping[str, Any]: ...
 
 
 class LazyTemporalCommandGateway:
@@ -167,6 +171,26 @@ class LazyTemporalCommandGateway:
             return False
         try:
             await self._raw_client.service_client.check_health()
+            from temporalio.api.enums.v1 import TaskQueueType
+            from temporalio.api.taskqueue.v1 import TaskQueue
+            from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+
+            queue_checks = (
+                (self._runtime.retrieval_task_queue, "TASK_QUEUE_TYPE_WORKFLOW"),
+                (self._runtime.retrieval_task_queue, "TASK_QUEUE_TYPE_ACTIVITY"),
+                (self._runtime.provider_task_queue, "TASK_QUEUE_TYPE_ACTIVITY"),
+            )
+            for task_queue, queue_type in queue_checks:
+                response = await self._raw_client.workflow_service.describe_task_queue(
+                    DescribeTaskQueueRequest(
+                        namespace=self._runtime.namespace,
+                        task_queue=TaskQueue(name=task_queue),
+                        task_queue_type=TaskQueueType.Value(queue_type),
+                        report_pollers=True,
+                    )
+                )
+                if not response.pollers:
+                    return False
         except Exception:
             return False
         return True
@@ -190,6 +214,38 @@ class LazyTemporalCommandGateway:
         operation_id: str,
     ) -> CommandResult | None:
         return await self._require().get_operation_result(store_key, operation_id)
+
+    async def start_preflight(self, request: ProviderPreflightRequest) -> str:
+        if self._raw_client is None:
+            raise DemoUnavailableError("Temporal client is not connected")
+        from temporalio.client import WorkflowAlreadyStartedError
+
+        from retrieval.temporal.workflows.provider_preflight import ProviderPreflightWorkflow
+
+        workflow_id = f"retrieval-preflight-{request.request_id}"
+        try:
+            await self._raw_client.start_workflow(
+                ProviderPreflightWorkflow.run,
+                request,
+                id=workflow_id,
+                task_queue=self._runtime.retrieval_task_queue,
+                execution_timeout=timedelta(minutes=6),
+            )
+        except WorkflowAlreadyStartedError:
+            pass
+        return workflow_id
+
+    async def get_preflight(self, workflow_id: str) -> Mapping[str, Any]:
+        if self._raw_client is None:
+            raise DemoUnavailableError("Temporal client is not connected")
+        handle = self._raw_client.get_workflow_handle(workflow_id)
+        description = await handle.describe()
+        status = description.status.name.lower()
+        payload: dict[str, Any] = {"workflow_id": workflow_id, "status": status}
+        if status == "completed":
+            result = await handle.result()
+            payload["result"] = asdict(result)
+        return payload
 
     def _require(self) -> RetrievalClient:
         if self._client is None:
@@ -252,6 +308,9 @@ class DemoService:
         command_gateway: DemoCommandGateway | None,
         store_creation: StoreCreationBoundary | None = None,
         migrations_ready: Callable[[], Awaitable[bool]] | None = None,
+        sync_metadata: Mapping[str, str] | None = None,
+        held_document_key: str | None = None,
+        display_name: str | None = None,
     ) -> None:
         self._config = config
         self._scenario = scenario
@@ -264,6 +323,9 @@ class DemoService:
             state_store,
         )
         self._migrations_ready = migrations_ready
+        self._sync_metadata = dict(sync_metadata or {})
+        self._held_document_key = held_document_key or scenario.held_document_key
+        self._display_name = display_name or scenario.display_name
         self._controls = DemoControlsManager(state_store, repository)
         self._started = False
 
@@ -297,7 +359,12 @@ class DemoService:
     async def create_run(self, *, idempotency_key: str) -> DemoRun:
         self._require_started()
         scope = "demo:runs:create"
-        request_hash = _payload_hash({"scenario_id": self._scenario.scenario_id})
+        request_hash = _payload_hash(
+            {
+                "scenario_id": self._scenario.scenario_id,
+                "display_name": self._display_name,
+            }
+        )
         key_hash = _idempotency_hash(idempotency_key)
         existing = await self._checked_receipt(scope, key_hash, request_hash)
         if existing is not None:
@@ -307,14 +374,14 @@ class DemoService:
         run = DemoRun(
             run_id=str(run_uuid),
             store_key=f"{self._config.store_key_prefix}-{run_uuid.hex[:12]}",
-            display_name=self._scenario.display_name,
+            display_name=self._display_name,
             baseline_generation=self._scenario.baseline_generation,
         )
         controls = DemoControls(
             run_id=run.run_id,
             quota_once_pending=True,
             quota_retry_after_seconds=self._scenario.quota_retry_after_seconds,
-            held_document_key=self._scenario.held_document_key,
+            held_document_key=self._held_document_key,
             hold_before_commit=True,
             release_requested=False,
         )
@@ -342,6 +409,58 @@ class DemoService:
         )
         return _run_from_payload(receipt.response)
 
+    async def start_preflight(self, *, idempotency_key: str) -> Mapping[str, Any]:
+        self._require_started()
+        if self._commands is None:
+            raise DemoUnavailableError("Temporal command gateway is not configured")
+        readiness = await self.ready()
+        if not readiness.ready:
+            raise DemoUnavailableError("platform dependencies are not ready for Drive preflight")
+        request_id = _idempotency_hash(idempotency_key)[:32]
+        request = ProviderPreflightRequest(
+            request_id=request_id,
+            provider_task_queue=getattr(
+                getattr(self._commands, "_runtime", None),
+                "provider_task_queue",
+                "retrieval-provider-v2",
+            ),
+        )
+        workflow_id = await self._commands.start_preflight(request)
+        return await self._state_store.put_preflight(
+            request_id=request_id,
+            workflow_id=workflow_id,
+            status="running",
+        )
+
+    async def get_preflight(self, workflow_id: str) -> Mapping[str, Any]:
+        self._require_started()
+        if self._commands is None:
+            raise DemoUnavailableError("Temporal command gateway is not configured")
+        persisted = await self._state_store.get_preflight(workflow_id)
+        try:
+            current = await self._commands.get_preflight(workflow_id)
+        except Exception:
+            return persisted
+        return await self._state_store.put_preflight(
+            request_id=str(persisted["request_id"]),
+            workflow_id=workflow_id,
+            status=str(current["status"]),
+            result=(current.get("result") if isinstance(current.get("result"), Mapping) else None),
+        )
+
+    async def get_proof(self, run_id: str) -> Mapping[str, Any]:
+        self._require_started()
+        run = await self._state_store.get_run(run_id)
+        proof = dict(await self._state_store.generation_proof(run.store_key))
+        proof["baseline_generation"] = run.baseline_generation
+        proof["late_writer_generation"] = run.baseline_generation
+        proof["fence_generation"] = run.baseline_generation + 1
+        quoted_store_key = run.store_key.replace("'", "''")
+        proof["proof_query"] = (
+            f"SELECT * FROM retrieval_demo_ui.generation_proof('{quoted_store_key}');"
+        )
+        return proof
+
     async def get_run(self, run_id: str) -> DemoRun:
         self._require_started()
         return await self._state_store.get_run(run_id)
@@ -358,9 +477,12 @@ class DemoService:
             "controller_workflow_id": store_controller_workflow_id(run.store_key),
             "quota_workflow_ids": (
                 user_quota_workflow_id(
-                    "northstar-scripted",
-                    _quota_credential_key(run.run_id),
-                    "demo",
+                    self._sync_metadata.get("provider", "northstar-scripted"),
+                    self._sync_metadata.get(
+                        "credential_key",
+                        _quota_credential_key(run.run_id),
+                    ),
+                    self._sync_metadata.get("quota_class", "demo"),
                 ),
             ),
         }
@@ -386,6 +508,7 @@ class DemoService:
             controller=controller,
             temporal_available=temporal_available,
             temporal_warning=warning,
+            story_state=_story_state(run, store, events),
         )
 
     async def start_sync(self, run_id: str, *, idempotency_key: str) -> DemoOperation:
@@ -557,18 +680,12 @@ class DemoService:
             StoreLifecycleState.SYNCING,
         }:
             raise DemoConflictError("answers are disabled after deactivation begins")
-        search_query = (
-            _EVIDENCE_QUERY
-            if normalized_question.casefold() == _FIXED_QUESTION.casefold()
-            else normalized_question
-        )
-        hits = await self.search(run_id, search_query, limit=12)
+        hits = await self.search(run_id, normalized_question, limit=12)
         answer = _evidence_answer(
             normalized_question,
             hits,
             backend=self._search.backend,
             generation=snapshot.lifecycle_generation,
-            scenario=self._scenario,
         )
         receipt = await self._state_store.put_idempotency_receipt(
             ApiIdempotencyReceipt(
@@ -584,9 +701,20 @@ class DemoService:
     async def ready(self) -> DemoReadiness:
         database_ready = await self._state_store.ready()
         temporal_ready = await self._commands.ready() if self._commands is not None else False
+        search_ready = True
+        embeddings_ready = True
+        search_probe = getattr(self._search, "readiness", None)
+        if search_probe is not None:
+            try:
+                search_status = await search_probe()
+                search_ready = bool(search_status.get("search"))
+                embeddings_ready = bool(search_status.get("embeddings"))
+            except Exception:
+                search_ready = False
+                embeddings_ready = False
         readiness_details = {
             "search_backend": self._search.backend,
-            "scenario": self._scenario.scenario_id,
+            "provider": self._sync_metadata.get("provider", self._scenario.scenario_id),
         }
         try:
             migrations_ready = (
@@ -597,12 +725,21 @@ class DemoService:
         except Exception as exc:
             migrations_ready = False
             readiness_details["migration_error"] = type(exc).__name__
-        ready = self._started and database_ready and temporal_ready and migrations_ready
+        ready = (
+            self._started
+            and database_ready
+            and temporal_ready
+            and migrations_ready
+            and search_ready
+            and embeddings_ready
+        )
         return DemoReadiness(
             ready=ready,
             database_ready=database_ready,
             temporal_ready=temporal_ready,
             migrations_ready=migrations_ready,
+            search_ready=search_ready,
+            embeddings_ready=embeddings_ready,
             details=readiness_details,
         )
 
@@ -691,10 +828,13 @@ class DemoService:
                         requested_at=datetime.now(UTC),
                         metadata={
                             "demo_run_id": run_id,
-                            "provider": "northstar-scripted",
-                            "credential_key": _quota_credential_key(run_id),
-                            "quota_class": "demo",
+                            "provider": self._sync_metadata.get("provider", "northstar-scripted"),
+                            "credential_key": self._sync_metadata.get(
+                                "credential_key", _quota_credential_key(run_id)
+                            ),
+                            "quota_class": self._sync_metadata.get("quota_class", "demo"),
                             "resource_types": "files",
+                            **self._sync_metadata,
                         },
                     )
                 )
@@ -910,6 +1050,35 @@ def _idempotency_hash(value: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _story_state(run: DemoRun, store: Any, events: tuple[DemoEvent, ...]) -> str:
+    event_types = {event.event_type for event in events}
+    if store.lifecycle_state is StoreLifecycleState.DEACTIVATION_FAILED:
+        return "failed"
+    if (
+        store.lifecycle_state is StoreLifecycleState.INACTIVE
+        and "stale_generation_rejected" in event_types
+    ):
+        return "complete"
+    if "stale_generation_rejected" in event_types:
+        return "late_write_rejected"
+    if store.lifecycle_generation >= run.baseline_generation + 1:
+        return "fenced"
+    if store.lifecycle_state is StoreLifecycleState.DEACTIVATING:
+        return "deactivating"
+    if "document_commit_held" in event_types:
+        return "retrievable" if store.document_count > 0 else "held"
+    if (
+        store.lifecycle_state is StoreLifecycleState.SYNCING
+        or {
+            "quota_wait_started",
+            "quota_wait_completed",
+        }
+        & event_types
+    ):
+        return "syncing"
+    return "ready"
+
+
 def _quota_credential_key(run_id: str) -> str:
     return f"northstar-demo-run:{run_id}"
 
@@ -1041,6 +1210,9 @@ def _normalize_hit(hit: Any) -> DemoSearchHit:
         text=getattr(hit, "excerpt", getattr(hit, "text", "")),
         score=float(hit.score),
         source_uri=hit.source_uri,
+        committed_generation=getattr(hit, "committed_generation", None),
+        keyword_rank=getattr(hit, "keyword_rank", None),
+        vector_rank=getattr(hit, "vector_rank", None),
     )
 
 
@@ -1050,20 +1222,22 @@ def _evidence_answer(
     *,
     backend: str,
     generation: int,
-    scenario: NorthstarScenario,
 ) -> EvidenceAnswer:
     by_document: dict[str, DemoSearchHit] = {}
     for hit in hits:
         by_document.setdefault(hit.document_key, hit)
-    ordered = [by_document[key] for key in scenario.answer_document_keys if key in by_document]
+    ordered = list(by_document.values())[:4]
     if ordered:
-        answer = (
-            "Prioritize the September 30 renewal plan, close the P1 ingestion-latency issue "
-            "against its August 15 target, confirm EU data residency and SCIM expansion, and "
-            "equip Aisha—the VP Engineering champion—with weekly delivery evidence."
-        )
+        evidence = []
+        for hit in ordered:
+            excerpt = re.sub(r"\[\[/?HIT\]\]", "", hit.text)
+            excerpt = " ".join(excerpt.split())
+            if len(excerpt) > 240:
+                excerpt = excerpt[:237].rstrip() + "..."
+            evidence.append(f"{hit.title}: {excerpt}")
+        answer = "Strongest committed evidence: " + " ".join(evidence)
     else:
-        answer = "No committed Northstar evidence matched the question."
+        answer = "No committed evidence matched the question."
     citations = tuple(
         EvidenceCitation(
             citation_id=f"{hit.document_key}#chunk-{hit.chunk_ordinal}",
@@ -1159,7 +1333,22 @@ async def create_service_from_env() -> DemoService:
         ),
         store_creation=PostgresNorthstarStoreCreationBoundary(state_store),
         migrations_ready=migrations_ready,
+        sync_metadata=_production_sync_metadata_from_env(),
+        held_document_key=os.environ.get("RETRIEVAL_DEMO_HELD_DOCUMENT_KEY") or None,
+        display_name=os.environ.get("RETRIEVAL_DEMO_DISPLAY_NAME", "Drive retrieval demo").strip(),
     )
+
+
+def _production_sync_metadata_from_env() -> dict[str, str]:
+    provider = os.environ.get("RETRIEVAL_DEMO_PROVIDER", "google-drive").strip()
+    credential_key = os.environ.get("RETRIEVAL_DEMO_CREDENTIAL_KEY", "drive-demo").strip()
+    return {
+        "provider": provider,
+        "credential_key": credential_key,
+        "quota_class": os.environ.get("RETRIEVAL_DEMO_QUOTA_CLASS", "drive-api-v3").strip(),
+        "resource_types": "files",
+        "refresh_search_index": "true",
+    }
 
 
 __all__ = [

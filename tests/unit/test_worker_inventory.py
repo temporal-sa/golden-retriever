@@ -39,6 +39,7 @@ EXPECTED_V2_TYPES = {
     "StoreControllerWorkflow",
     "UserQuotaWorkflow",
     "UserSyncWorkflow",
+    "ProviderPreflightWorkflow",
 }
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -62,13 +63,13 @@ def test_databricks_bundle_syncs_required_repository_root() -> None:
     assert "name: PGHOST" not in bundle
 
 
-def test_final_inventory_has_exactly_seventeen_v2_workflow_types() -> None:
+def test_final_inventory_has_exactly_eighteen_v2_workflow_types() -> None:
     names = {
         workflow._Definition.must_from_class(workflow_type).name
         for workflow_type in V2_WORKFLOW_TYPES
     }
 
-    assert len(V2_WORKFLOW_TYPES) == 17
+    assert len(V2_WORKFLOW_TYPES) == 18
     assert names == EXPECTED_V2_TYPES
     assert "QuotaWaitWorkflow" not in names
     assert "AccessioningWorkflow" not in names

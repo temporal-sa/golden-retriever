@@ -11,6 +11,19 @@ variables:
     description: Full Lakebase branch resource name (projects/.../branches/...)
   lakebase_database:
     description: Full Lakebase database resource name (projects/.../branches/.../databases/...)
+  embedding_endpoint:
+    description: Databricks Model Serving endpoint used for 1024-dimensional embeddings
+  demo_held_document_key:
+    description: Stable held Drive document key in gdrive:<file-id> form
+  google_drive_folder_url:
+    description: Browser URL for the stable demo folder
+    default: ""
+  temporal_web_base_url:
+    description: Temporal UI base URL used to create workflow deep links
+    default: ""
+  lakebase_tooling_url:
+    description: Databricks Lakebase tooling URL shown during the demo
+    default: ""
   temporal_secret_scope:
     description: Databricks secret scope containing the Temporal connection values
   temporal_address_secret_key:
@@ -50,6 +63,10 @@ resources:
             scope: ${var.temporal_secret_scope}
             key: ${var.temporal_api_key_secret_key}
             permission: READ
+        - name: embedding-endpoint
+          serving_endpoint:
+            name: ${var.embedding_endpoint}
+            permission: CAN_QUERY
       config:
         command:
           - python
@@ -70,10 +87,30 @@ resources:
             value: retrieval-v2
           - name: TEMPORAL_PROVIDER_TASK_QUEUE
             value: retrieval-provider-v2
+          - name: DATABRICKS_EMBEDDING_ENDPOINT
+            value_from: embedding-endpoint
           - name: RETRIEVAL_DEMO_MODE
             value: "true"
           - name: RETRIEVAL_SEARCH_BACKEND
-            value: postgres_text
+            value: lakebase_hybrid
+          - name: RETRIEVAL_EMBEDDING_DIMENSION
+            value: "1024"
+          - name: RETRIEVAL_STAGING_BACKEND
+            value: lakebase
+          - name: RETRIEVAL_DEMO_PROVIDER
+            value: google-drive
+          - name: RETRIEVAL_DEMO_DISPLAY_NAME
+            value: Drive retrieval demo
+          - name: RETRIEVAL_DEMO_CREDENTIAL_KEY
+            value: drive-demo
+          - name: RETRIEVAL_DEMO_HELD_DOCUMENT_KEY
+            value: ${var.demo_held_document_key}
+          - name: GOOGLE_DRIVE_FOLDER_URL
+            value: ${var.google_drive_folder_url}
+          - name: TEMPORAL_WEB_BASE_URL
+            value: ${var.temporal_web_base_url}
+          - name: LAKEBASE_TOOLING_URL
+            value: ${var.lakebase_tooling_url}
           - name: LAKEBASE_POOL_MIN_SIZE
             value: "1"
           - name: LAKEBASE_POOL_MAX_SIZE

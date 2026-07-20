@@ -61,16 +61,22 @@ async def apply_runtime_grants(provider: GrantProvider, roles: RuntimeRoles) -> 
         ).format(app),
         sql.SQL(
             "GRANT INSERT, UPDATE ON retrieval_demo_ui.demo_events, "
-            "retrieval_demo_ui.demo_operations, retrieval_demo_ui.api_idempotency TO {}"
+            "retrieval_demo_ui.demo_operations, retrieval_demo_ui.api_idempotency, "
+            "retrieval_demo_ui.preflight_runs TO {}"
         ).format(app),
         sql.SQL("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA retrieval_demo_ui TO {}").format(
             app
         ),
         sql.SQL(
-            "GRANT EXECUTE ON FUNCTION retrieval_demo_ui.create_northstar_run"
+            "GRANT EXECUTE ON FUNCTION retrieval_demo_ui.create_demo_run"
             "(uuid, text, text, bigint, double precision, text, boolean) TO {}"
         ).format(app),
-        sql.SQL("GRANT USAGE ON SCHEMA retrieval, retrieval_demo_ui TO {}").format(worker),
+        sql.SQL("GRANT EXECUTE ON FUNCTION retrieval_demo_ui.generation_proof(text) TO {}").format(
+            app
+        ),
+        sql.SQL(
+            "GRANT USAGE ON SCHEMA retrieval, retrieval_connector, retrieval_demo_ui TO {}"
+        ).format(worker),
         sql.SQL(
             "GRANT SELECT ON retrieval.stores, "
             "retrieval.store_users, retrieval.retrieval_state, retrieval.documents, "
@@ -88,6 +94,10 @@ async def apply_runtime_grants(provider: GrantProvider, roles: RuntimeRoles) -> 
             "retrieval.document_chunks TO {}"
         ).format(worker),
         sql.SQL("GRANT SELECT ON retrieval.schema_migrations TO {}").format(worker),
+        sql.SQL("GRANT MAINTAIN ON retrieval.document_chunks TO {}").format(worker),
+        sql.SQL(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA retrieval_connector TO {}"
+        ).format(worker),
         sql.SQL(
             "GRANT SELECT ON retrieval_demo_ui.demo_runs, retrieval_demo_ui.demo_controls TO {}"
         ).format(worker),

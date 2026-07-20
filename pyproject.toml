@@ -18,6 +18,11 @@ lakebase = [
   "databricks-sdk>=0.74,<1",
   "psycopg[binary,pool]>=3.3,<4",
 ]
+google-drive = [
+  "google-auth[requests]>=2.40,<3",
+  "httpx>=0.28,<1",
+  "pypdf>=5,<7",
+]
 demo-app = [
   "databricks-sdk>=0.74,<1",
   "fastapi>=0.115,<1",

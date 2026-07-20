@@ -151,7 +151,9 @@ async def test_commit_locks_generation_before_receipt_and_writes_atomically() ->
     assert "write_receipts" in connection.calls[1][0]
     assert connection.calls[0][0].find("FROM retrieval.stores") >= 0
     chunk_params = connection.calls[-1][1]
-    assert chunk_params[-3] == [0, 1]
+    assert chunk_params[-5] == [0, 1]
+    assert chunk_params[-2] == [None, None]
+    assert chunk_params[-1] == [None, None]
     connection.assert_complete()
 
 

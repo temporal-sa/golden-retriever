@@ -1,66 +1,53 @@
 # Retrieval demo App
 
-This directory contains the FastAPI HTTP API and browser UI for the Northstar demonstration. The
-App is a command/read gateway:
+This directory contains the FastAPI command/read gateway and the guided browser experience for the
+Temporal + Lakebase Google Drive demo. The App:
 
-- it submits commands to a store's Temporal controller;
-- it reads lifecycle state, search results, controls, and events from Lakebase;
-- it serves the static four-panel UI;
-- it does **not** run Temporal workflows or Activities.
+- runs a bounded Temporal preflight that inspects one stable Drive folder without downloading file
+  bodies into Workflow history;
+- submits sync and deactivation commands to the store controller;
+- reads lifecycle state, hybrid search results, controls, proof, and events from Lakebase;
+- presents the six-step 10-minute story and links to Google Drive, Temporal UI, and Lakebase tooling;
+- does **not** run Temporal Workflows or Activities.
 
-The long-running `retrieval-worker` is a separate process and deployment.
+The long-running `retrieval-worker` is a separate deployment.
 
-## Directory contents
+## Runtime flow
 
-| Path | Purpose |
-|---|---|
-| `app.py` | FastAPI routes, error mapping, lifespan, and Uvicorn entry point |
-| `static/index.html` | Browser document |
-| `static/app.js` | UI state, polling, commands, and rendering |
-| `static/app.css` | UI layout and styles |
-| `databricks.yml` | Databricks Asset Bundle for the App/resource bindings |
-| `app.yaml` | directory-local command manifest; root `app.yaml` is the effective bundled manifest |
-| `requirements.txt` | pinned App dependencies used by Databricks Apps |
+1. Preflight traverses Drive metadata and identifies the configured late-write file.
+2. The App creates a fresh generation-7 run through a constrained `SECURITY DEFINER` function.
+3. Sync reaches the worker. A single durable provider throttle is injected, Temporal retries it,
+   and Drive traversal checkpoints/staged bodies live in Lakebase.
+4. The worker embeds deterministic chunks through Databricks Model Serving and commits them under
+   the generation fence.
+5. Lakebase Search runs independent BM25 and ANN candidates and the App fuses them with reciprocal
+   rank fusion.
+6. Deactivation advances authority to generation 8 before cleanup. Releasing the held generation-7
+   writer proves the stale transaction is rejected.
 
-## Runtime request flow
+Every mutating HTTP request requires an `Idempotency-Key`. Receipts, preflight state, controls, and
+demo events are durable in Lakebase. A temporary Temporal status outage does not replace Lakebase as
+the authoritative lifecycle read.
 
-1. A browser sends an HTTP request to FastAPI.
-2. Every `POST` requires an `Idempotency-Key`.
-3. The service stores/replays the HTTP receipt in Lakebase.
-4. Sync/deactivation commands go to `RetrievalClient` and the store controller.
-5. The request returns an operation identity without waiting for workflow completion.
-6. The browser polls snapshots, operations, and events.
+## Required production dependencies
 
-If a Temporal status query is temporarily unavailable, snapshots still return authoritative
-Lakebase state with a warning. Search and answer requests fail closed when the store is no longer
-in a readable lifecycle state.
+- Lakebase Postgres with core and demo migrations current;
+- Lakebase Search Beta enabled before applying the hybrid-search migration;
+- a 1024-dimensional Databricks embedding endpoint accessible to the worker and App identities;
+- a stable Google Drive folder plus credentials available only to the worker;
+- Temporal Cloud credentials and worker pollers on both Task Queues;
+- distinct migration-owner, App, and worker database identities;
+- `RETRIEVAL_DEMO_MODE=true` and `RETRIEVAL_SEARCH_BACKEND=lakebase_hybrid`.
 
-## Dependencies and identities
-
-The App needs:
-
-- Lakebase/Postgres with both schemas migrated;
-- an App database role with the explicit repository grants;
-- a reachable Temporal namespace and valid API key/TLS configuration;
-- `RETRIEVAL_DEMO_MODE=true`;
-- a separately deployed worker before workflow commands can progress.
-
-The App role is read-oriented for the core schema. It creates a fixed Northstar run through the
-migration-owned `SECURITY DEFINER` function and writes only allowed demo objects. It must not share
-the worker database identity.
+There is no production text-search fallback. If Lakebase Search or the embedding endpoint is not
+ready, deployment/readiness must fail instead of silently changing the demo.
 
 ## Run locally
 
-From the repository root, install dependencies:
+Install dependencies and apply migrations/grants from the repository root:
 
 ```bash
 uv sync --frozen --extra dev
-```
-
-Create protected per-role environment files as described in the root
-[README](../../README.md#run-the-complete-demo-locally), then apply migrations/grants as the owner:
-
-```bash
 RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-migrate
 RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-demo-migrate
 RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-grant-roles \
@@ -68,65 +55,52 @@ RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-grant-roles \
   --worker-role <WORKER_DATABASE_ROLE>
 ```
 
-Start the worker in one terminal:
+The packaged scripted provider remains available for a no-Google local rehearsal:
 
 ```bash
 RETRIEVAL_ENV_FILE=.env.worker \
 RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle \
 uv run retrieval-worker
-```
 
-Start the App with the App identity in another terminal:
-
-```bash
 RETRIEVAL_ENV_FILE=.env.app uv run retrieval-demo-app
 ```
 
-Verify and open it:
+For the real connector, configure the worker with
+`retrieval.google_drive.bundle:create_adapter_bundle`, Lakebase staging, the root folder ID, the
+held file ID, and Google credentials. See the
+[Google Drive integration guide](../../docs/google-drive-integration.md).
+
+Verify:
 
 ```bash
 curl --fail http://127.0.0.1:8000/healthz
 curl --fail http://127.0.0.1:8000/readyz
 ```
 
-The default URL is <http://127.0.0.1:8000>. `DATABRICKS_APP_PORT` overrides the port; the server
-always binds to `0.0.0.0`.
-
-Use the executable instead of invoking Uvicorn directly. `retrieval-demo-app` performs the safe
-environment-file injection; an external Uvicorn command must receive an already prepared process
-environment.
-
-## Environment loading
-
-- The executable inspects only `.env` in the current working directory.
-- `RETRIEVAL_ENV_FILE=<path>` selects another file.
-- `RETRIEVAL_ENV_FILE=` disables file loading.
-- Process/platform values win over file values.
-- `${NAME}` interpolation is disabled.
-- Importing `apps.retrieval_demo.app` reads no environment and opens no connection.
-
-Do not package or commit `.env` files.
+The default URL is <http://127.0.0.1:8000>. `DATABRICKS_APP_PORT` overrides the port.
 
 ## HTTP endpoints
 
 | Method and path | Purpose |
 |---|---|
-| `GET /healthz` | Process liveness only |
+| `GET /healthz` | Process liveness |
 | `GET /readyz` | Lakebase, both migration ledgers, and Temporal connectivity |
-| `POST /api/demo/runs` | Create/replay a fresh Northstar run |
-| `GET /api/demo/runs/{run_id}/snapshot` | Lifecycle/counts plus best-effort workflow status |
-| `GET /api/demo/runs/{run_id}/events` | Durable event timeline |
-| `GET /api/demo/runs/{run_id}/search` | Current-generation text search |
+| `POST /api/preflight` | Start/replay bounded Drive metadata preflight |
+| `GET /api/preflight/{workflow_id}` | Poll preflight state/result |
+| `GET /api/preflight/{workflow_id}/source-files` | Read the sanitized source-file list |
+| `POST /api/demo/runs` | Create/replay a fresh demo run |
+| `GET /api/demo/runs/{run_id}/snapshot` | Lifecycle/counts plus best-effort Workflow state |
+| `GET /api/demo/runs/{run_id}/events` | Durable event evidence |
+| `GET /api/demo/runs/{run_id}/search` | Current-generation Lakebase hybrid search |
 | `POST /api/demo/runs/{run_id}/sync` | Submit asynchronous sync |
 | `POST /api/demo/runs/{run_id}/deactivate` | Submit asynchronous deactivation |
-| `POST /api/demo/runs/{run_id}/controls/hold` | Enable the configured late-writer hold |
-| `POST /api/demo/runs/{run_id}/controls/release` | Release after the generation fence |
-| `POST /api/demo/runs/{run_id}/ask` | Return deterministic cited evidence |
+| `POST /api/demo/runs/{run_id}/controls/release` | Release the held writer after the fence |
+| `POST /api/demo/runs/{run_id}/ask` | Return a dynamic, cited answer |
+| `GET /api/demo/runs/{run_id}/proof` | Read sanitized generation/write visibility proof |
+| `GET /api/demo/tooling` | Read credential-free demo tooling links |
 | `GET /api/operations/{operation_id:path}` | Poll operation state |
 
-`TEMPORAL_WEB_BASE_URL` optionally enables workflow deep links. It may be a base origin or a
-template containing `{namespace}` and `{workflow_id}`. Only credential-free HTTP(S) links are
-returned to the browser.
+Tool URLs must be credential-free HTTP(S) URLs without query strings or fragments.
 
 ## Databricks bundle inputs
 
@@ -136,46 +110,25 @@ Run bundle commands from this directory. Required variables are:
 |---|---|
 | `lakebase_branch` | full `projects/.../branches/...` resource name |
 | `lakebase_database` | full `projects/.../branches/.../databases/...` resource name |
+| `embedding_endpoint` | 1024-dimensional Databricks Model Serving endpoint name |
+| `demo_held_document_key` | `gdrive:<stable-file-id>` |
 | `temporal_secret_scope` | scope containing address, namespace, and API key |
 
-The default secret keys are `temporal-address`, `temporal-namespace`, and `temporal-api-key`.
-
-Validate without deploying:
+Optional presentation variables are `google_drive_folder_url`, `temporal_web_base_url`, and
+`lakebase_tooling_url`.
 
 ```bash
 databricks bundle validate --strict --profile <PROFILE> -t dev \
   --var lakebase_branch=projects/<PROJECT>/branches/<BRANCH> \
   --var lakebase_database=projects/<PROJECT>/branches/<BRANCH>/databases/<DATABASE> \
+  --var embedding_endpoint=<ENDPOINT> \
+  --var demo_held_document_key=gdrive:<FILE_ID> \
   --var temporal_secret_scope=<SECRET_SCOPE>
 ```
 
-The `postgres` binding injects canonical `PG*` values, App OAuth identity, and
-`LAKEBASE_ENDPOINT`. Secret resources inject Temporal configuration. Bundle sync includes the
-repository root so root `app.yaml`, root requirements, `apps`, and `src/retrieval` deploy together;
-ignored environment files are excluded.
+`bundle deploy` creates/updates resources and uploads source; it does not start the App process.
+After migrations, grants, worker, and Drive configuration are ready, run `bundle run retrieval_demo`
+with the same variables.
 
-`bundle deploy` creates/updates the resource and uploads source. It does not start/deploy the App
-process. After migrations/grants are ready, run:
-
-```bash
-databricks bundle run retrieval_demo --profile <PROFILE> -t dev \
-  --var lakebase_branch=projects/<PROJECT>/branches/<BRANCH> \
-  --var lakebase_database=projects/<PROJECT>/branches/<BRANCH>/databases/<DATABASE> \
-  --var temporal_secret_scope=<SECRET_SCOPE>
-```
-
-Follow the complete [deployment runbook](../../docs/runbooks/deploy-lakebase-temporal-demo.md) for
-identity creation, migrations, worker handoff, verification, and rollback.
-
-## Troubleshooting
-
-| Symptom | Check |
-|---|---|
-| Bundle summary says App URL is not deployed | Run `bundle run retrieval_demo` after prerequisites |
-| App crashes with missing migrations | Apply both schemas and grants, then redeploy |
-| App crashes with `Jwt is missing` | Re-enter the Temporal API key without a trailing newline |
-| Database permission error | Verify App `service_principal_client_id` equals the granted Postgres role |
-| `/readyz` redirects | Authenticate through Databricks OIDC first |
-| `/readyz` reports Temporal false | Address, namespace, API key, TLS, and outbound egress |
-| Commands stay pending | Confirm a worker polls both Task Queues/current build |
-| Workflow links are absent | Configure `TEMPORAL_WEB_BASE_URL` |
+Follow the [deployment runbook](../../docs/runbooks/deploy-lakebase-temporal-demo.md) and rehearse
+with the [10-minute presenter runbook](../../docs/runbooks/google-drive-demo.md).

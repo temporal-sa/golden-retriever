@@ -13,8 +13,11 @@ and the quickest ways to run or test the project.
 | Understand the system | [System specification](lakebase-temporal-demo-spec.md), then [workflow topology](workflow-topology.md) |
 | Find code or configuration | [Implementation map](../IMPLEMENTATION_MAP.md) |
 | Run the demo locally | [Root README](../README.md#run-the-complete-demo-locally), then [App guide](../apps/retrieval_demo/README.md) |
+| Implement the Google Drive demo | [Google Drive demo implementation specification](google-drive-demo-implementation-spec.md) |
+| Present the 10-minute demo | [Google Drive presenter runbook](runbooks/google-drive-demo.md) |
 | Deploy to Databricks | [Databricks deployment runbook](runbooks/deploy-lakebase-temporal-demo.md) |
 | Deploy through tmprl-demo.cloud | [tmprl-demo.cloud runbook](runbooks/deploy-tmprl-demo-cloud.md) |
+| Connect Google Drive | [Google Drive integration](google-drive-integration.md) |
 | Change database schemas | [Migration and rollback runbook](runbooks/migration-and-rollback.md) |
 | Evaluate production readiness | [Production-readiness guide](architecture-production-readiness.md) |
 | Operate dashboards and alerts | [Metrics and observability](operations/metrics.md) |
@@ -34,7 +37,7 @@ and the quickest ways to run or test the project.
   when it targets the current generation.
 - **Lakebase:** Databricks' managed Postgres service. It stores the authoritative lifecycle and
   retrieval data.
-- **Northstar:** the packaged five-document demonstration scenario.
+- **Northstar:** the packaged five-document source substitute used only for local rehearsals.
 - **Store:** one independently synchronized and deactivated retrieval data set.
 - **Task Queue:** the Temporal queue from which a worker polls work. This project uses one queue
   for workflows/database work and one for provider calls.

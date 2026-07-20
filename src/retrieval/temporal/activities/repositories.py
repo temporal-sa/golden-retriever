@@ -55,6 +55,8 @@ class SearchChunk:
     ordinal: int
     text: str
     content_hash: str
+    embedding: tuple[float, ...] | None = None
+    embedding_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +188,8 @@ def document_payload_hash(
                 "ordinal": chunk.ordinal,
                 "text": chunk.text,
                 "content_hash": chunk.content_hash,
+                "embedding": chunk.embedding,
+                "embedding_model": chunk.embedding_model,
             }
             for chunk in document.chunks
         ],

@@ -288,6 +288,8 @@ class StoreControllerWorkflow:
                 metadata, "activation_recent_page_cap", 5
             ),
             enable_search_attributes=self._state.enable_search_attributes,
+            refresh_search_index=metadata.get("refresh_search_index", "false").lower()
+            in {"1", "true", "yes", "on"},
         )
 
     async def _request_sync(self, command: SyncCommand) -> OperationAccepted:

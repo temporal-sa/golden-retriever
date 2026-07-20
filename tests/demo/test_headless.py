@@ -10,10 +10,10 @@ async def test_headless_story_proves_quota_fence_stale_writer_and_cleanup() -> N
     assert result.committed_before_fence == 4
     assert result.stale_document_key == "late-security-review.md"
     assert result.citation_document_keys == (
-        "renewal-plan.md",
-        "support-escalation.md",
         "northstar-qbr.md",
+        "renewal-plan.md",
         "stakeholders.md",
+        "support-escalation.md",
     )
     assert (result.final_state, result.final_generation) == ("inactive", 8)
     assert (result.final_document_count, result.final_chunk_count) == (0, 0)

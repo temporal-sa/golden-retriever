@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, TypeVar
@@ -453,11 +454,17 @@ class LakebaseRetrievalRepository:
                             chunk_ordinal,
                             chunk_text,
                             chunk_hash,
+                            embedding,
+                            embedding_model,
                             lifecycle_generation
                         )
-                        SELECT %s, %s, chunks.ordinal, chunks.chunk_text, chunks.chunk_hash, %s
-                        FROM unnest(%s::integer[], %s::text[], %s::text[])
-                            AS chunks(ordinal, chunk_text, chunk_hash)
+                        SELECT %s, %s, chunks.ordinal, chunks.chunk_text, chunks.chunk_hash,
+                               chunks.embedding_text::vector, chunks.embedding_model, %s
+                        FROM unnest(
+                            %s::integer[], %s::text[], %s::text[], %s::text[], %s::text[]
+                        ) AS chunks(
+                            ordinal, chunk_text, chunk_hash, embedding_text, embedding_model
+                        )
                         """,
                         (
                             store_key,
@@ -466,6 +473,8 @@ class LakebaseRetrievalRepository:
                             [chunk.ordinal for chunk in document.chunks],
                             [chunk.text for chunk in document.chunks],
                             [chunk.content_hash for chunk in document.chunks],
+                            [_vector_literal(chunk.embedding) for chunk in document.chunks],
+                            [chunk.embedding_model for chunk in document.chunks],
                         ),
                     )
                     return outcome
@@ -827,9 +836,22 @@ def _validate_document(document: SearchableDocument) -> None:
             raise ValueError("chunk text must not be empty")
         if _SHA256.fullmatch(chunk.content_hash) is None:
             raise ValueError("chunk content_hash must be lowercase SHA-256 hex")
+        if (chunk.embedding is None) != (chunk.embedding_model is None):
+            raise ValueError("chunk embedding and embedding_model must be supplied together")
+        if chunk.embedding is not None:
+            if not chunk.embedding:
+                raise ValueError("chunk embedding must not be empty")
+            if not all(math.isfinite(value) for value in chunk.embedding):
+                raise ValueError("chunk embedding values must be finite")
         ordinals.add(chunk.ordinal)
     if tuple(chunk.ordinal for chunk in document.chunks) != tuple(range(len(document.chunks))):
         raise ValueError("chunk ordinals must be contiguous and ordered from zero")
+
+
+def _vector_literal(vector: tuple[float, ...] | None) -> str | None:
+    if vector is None:
+        return None
+    return "[" + ",".join(format(value, ".17g") for value in vector) + "]"
 
 
 __all__ = ["AsyncConnectionProvider", "LakebaseRetrievalRepository", "create_repository"]

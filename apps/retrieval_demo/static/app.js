@@ -1,526 +1,232 @@
 "use strict";
 
-function persistedRunId() {
-  try {
-    return window.localStorage.getItem("retrieval-demo-run-id");
-  } catch {
-    return null;
-  }
-}
-
-function persistRunId(runId) {
-  try {
-    window.localStorage.setItem("retrieval-demo-run-id", runId);
-  } catch {
-    // Storage can be disabled by browser policy; the current page still works without it.
-  }
-}
-
+const $ = (id) => document.getElementById(id);
 const state = {
-  runId: persistedRunId(),
+  runId: safeStorageGet("retrieval-demo-run-id"),
+  preflightWorkflowId: safeStorageGet("retrieval-demo-preflight-id"),
   snapshot: null,
   events: [],
   operations: new Map(),
-  polling: false,
+  proofQuery: null,
+  pollTimer: null,
 };
 
-const element = (id) => document.getElementById(id);
-
-function idempotencyKey(action) {
-  const random = window.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
-  return `retrieval-demo:${action}:${random}`;
-}
+function safeStorageGet(key) { try { return window.localStorage.getItem(key); } catch { return null; } }
+function safeStorageSet(key, value) { try { window.localStorage.setItem(key, value); } catch { /* optional */ } }
+function idempotencyKey(action) { return `retrieval-demo:${action}:${window.crypto?.randomUUID?.() ?? Date.now()}`; }
+function setText(id, value) { const node = $(id); if (node) node.textContent = value ?? "—"; }
+function get(object, ...paths) { for (const path of paths) { const found = path.split(".").reduce((current, key) => current?.[key], object); if (found !== undefined && found !== null) return found; } return undefined; }
+function safeHttpUrl(value) { try { const parsed = new URL(value); return ["http:", "https:"].includes(parsed.protocol) && !parsed.username && !parsed.password ? parsed.href : null; } catch { return null; } }
+function hasActiveOperation(type) { return [...state.operations.values()].some((operation) => operation.operation_type === type && !["completed", "failed", "canceled"].includes(String(operation.status).toLowerCase())); }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      Accept: "application/json",
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...(options.headers ?? {}),
-    },
-  });
-  let payload = null;
-  try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-  if (!response.ok) {
-    const message =
-      payload?.error?.message ?? payload?.detail?.message ?? "The request could not be completed.";
-    const error = new Error(message);
-    error.status = response.status;
-    throw error;
-  }
+  const response = await fetch(path, { ...options, headers: { Accept: "application/json", ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers ?? {}) } });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(payload?.error?.message ?? payload?.detail?.message ?? `Request failed (${response.status})`);
   return payload;
 }
 
-function value(object, ...paths) {
-  for (const path of paths) {
-    const result = path.split(".").reduce((current, part) => current?.[part], object);
-    if (result !== undefined && result !== null) return result;
-  }
-  return undefined;
+function showError(error) { setText("error-banner", error instanceof Error ? error.message : String(error)); $("error-banner").hidden = false; }
+function clearError() { $("error-banner").hidden = true; }
+function setBusy(button, busy, label) { if (busy) { button.dataset.label = button.textContent; button.textContent = label; } else if (button.dataset.label) button.textContent = button.dataset.label; button.disabled = busy; }
+
+function database(snapshot) { return get(snapshot, "database", "store", "store_snapshot") ?? snapshot?.store ?? snapshot ?? {}; }
+function controls(snapshot) { return get(snapshot, "controls", "demo_controls") ?? {}; }
+function lifecycle(snapshot = state.snapshot) { return String(get(database(snapshot), "lifecycle_state", "state") ?? "unknown").toLowerCase(); }
+function generation(snapshot = state.snapshot) { return Number(get(database(snapshot), "lifecycle_generation", "generation") ?? -1); }
+
+function activateStep(name) {
+  document.querySelectorAll(".story-rail li").forEach((item) => item.classList.toggle("active", item.dataset.step === name));
+  document.querySelectorAll(".story-card").forEach((card) => card.classList.remove("active-card"));
+  $(`${name}-card`)?.classList.add("active-card");
 }
 
-function setText(id, text) {
-  element(id).textContent = text === undefined || text === null ? "—" : String(text);
-}
-
-function showError(error) {
-  const banner = element("error-banner");
-  banner.textContent = error instanceof Error ? error.message : String(error);
-  banner.hidden = false;
-}
-
-function clearError() {
-  element("error-banner").hidden = true;
-}
-
-function setBusy(button, busy, label) {
-  if (busy) {
-    button.dataset.label = button.textContent;
-    button.textContent = label;
-  } else if (button.dataset.label) {
-    button.textContent = button.dataset.label;
-  }
-  button.disabled = busy;
-}
-
-function databaseSnapshot(snapshot) {
-  return value(snapshot, "database", "store", "store_snapshot") ?? snapshot ?? {};
-}
-
-function controlsSnapshot(snapshot) {
-  return value(snapshot, "controls", "demo_controls") ?? {};
-}
-
-function controllerSnapshot(snapshot) {
-  return value(snapshot, "controller", "controller_snapshot") ?? {};
-}
-
-function lifecycleState(snapshot) {
-  return String(
-    value(databaseSnapshot(snapshot), "lifecycle_state", "state") ?? "unknown",
-  ).toLowerCase();
-}
-
-function generation(snapshot) {
-  return Number(value(databaseSnapshot(snapshot), "lifecycle_generation", "generation") ?? -1);
+function inferredStep() {
+  if (!state.runId) return "connect";
+  const story = state.snapshot?.story_state;
+  if (["complete", "late_write_rejected"].includes(story)) return "recap";
+  if (["deactivating", "fenced"].includes(story)) return "reject";
+  if (["held", "retrievable"].includes(story)) return "retrieve";
+  if (story === "syncing") return "sync";
+  const life = lifecycle();
+  if (state.events.some((event) => event.event_type === "stale_generation_rejected")) return "recap";
+  if (["deactivating", "inactive", "deactivation_failed"].includes(life)) return "reject";
+  if (Number(get(database(state.snapshot), "document_count") ?? 0) > 0) return "retrieve";
+  return "sync";
 }
 
 function renderSnapshot(snapshot) {
   state.snapshot = snapshot;
-  const database = databaseSnapshot(snapshot);
-  const controller = controllerSnapshot(snapshot);
-  const controls = controlsSnapshot(snapshot);
-  const lifecycle = lifecycleState(snapshot);
-  const databaseGeneration = generation(snapshot);
-
-  setText("display-name", value(database, "display_name") ?? "Northstar AI");
-  setText("database-generation", databaseGeneration >= 0 ? databaseGeneration : "—");
-  setText("user-count", value(database, "active_user_count", "user_count") ?? 0);
-  setText("document-count", value(database, "document_count") ?? 0);
-  setText("chunk-count", value(database, "chunk_count") ?? 0);
-  setText(
-    "controller-state",
-    value(controller, "lifecycle_state", "state", "phase", "status") ?? "unavailable",
-  );
-  const controllerGeneration = value(controller, "lifecycle_generation", "generation");
-  setText(
-    "controller-generation",
-    controllerGeneration === undefined ? "generation unavailable" : `generation ${controllerGeneration}`,
-  );
-
-  const badge = element("lifecycle-badge");
-  badge.textContent = lifecycle;
-  badge.className = `badge ${
-    lifecycle === "active"
-      ? "badge-active"
-      : lifecycle === "deactivating" || lifecycle === "inactive"
-        ? "badge-danger"
-        : "badge-neutral"
-  }`;
-
-  const controllerError =
-    value(snapshot, "controller_error", "temporal_error", "temporal_warning") ??
-    (value(snapshot, "temporal_available") === false ? "temporarily_unavailable" : null);
-  const temporalBadge = element("temporal-status");
-  temporalBadge.textContent = controllerError ? "Temporal unavailable" : "Temporal connected";
-  temporalBadge.className = `badge ${controllerError ? "badge-warning" : "badge-active"}`;
-
-  const quotaPending = value(controls, "quota_once_pending");
-  const quotaWaitStarted = state.events.some(
-    (event) => value(event, "event_type", "type") === "quota_wait_started",
-  );
-  const quotaWaitCompleted = state.events.some(
-    (event) => value(event, "event_type", "type") === "quota_wait_completed",
-  );
-  const quotaState = quotaWaitCompleted
-    ? "quota recovered"
-    : quotaWaitStarted || quotaPending === false
-      ? "quota waiting"
-      : "quota pending";
-  element("quota-badge").textContent = quotaState;
-  element("quota-badge").className = `badge ${quotaWaitCompleted ? "badge-active" : "badge-warning"}`;
-
-  const heldEventObserved = state.events.some(
-    (event) => value(event, "event_type", "type") === "document_commit_held",
-  );
-  const held = Boolean(
-    value(controls, "commit_held", "held", "hold_active") ?? heldEventObserved,
-  );
-  const holdRequested = Boolean(value(controls, "hold_requested", "hold_before_commit"));
-  const released = Boolean(value(controls, "release_requested", "released"));
-  setText(
-    "hold-state",
-    released ? "Release requested" : held ? "Processed and held before commit" : holdRequested ? "Armed" : "Not armed",
-  );
-
-  const hasRun = Boolean(state.runId);
-  element("sync").disabled = !hasRun || lifecycle !== "active";
-  element("ask").disabled = !hasRun || lifecycle !== "active" || Number(value(database, "document_count") ?? 0) < 1;
-  const deactivateButton = element("deactivate");
-  const canDeactivate = ["active", "deactivation_failed"].includes(lifecycle);
-  deactivateButton.disabled = !hasRun || !canDeactivate;
-  deactivateButton.textContent =
-    lifecycle === "deactivation_failed" ? "Retry deactivation" : "Deactivate store";
-  element("hold").disabled = !hasRun || lifecycle !== "active" || holdRequested || held;
-  const fencedLifecycle = ["deactivating", "inactive", "deactivation_failed"].includes(lifecycle);
-  const canRelease =
-    hasRun && fencedLifecycle && Number(databaseGeneration) >= 8 && held && !released;
-  element("release").disabled = !canRelease;
-  setText(
-    "release-hint",
-    canRelease
-      ? "Generation 8 is authoritative. Releasing now demonstrates stale generation rejection."
-      : "Release unlocks only after Lakebase commits the generation 8 fence.",
-  );
-
-  renderWorkflowGroups(workflowGroups(snapshot), snapshot);
-  const backend = value(snapshot, "search_backend", "backend") ?? "postgres_text";
-  setText("backend-badge", backend);
+  const store = database(snapshot);
+  const control = controls(snapshot);
+  const life = lifecycle(snapshot);
+  const gen = generation(snapshot);
+  setText("run-label", state.runId ?? "not created");
+  setText("display-name", get(store, "display_name") ?? "Drive retrieval");
+  setText("database-generation", gen >= 0 ? gen : "—");
+  setText("authority-generation", gen >= 0 ? `generation ${gen}` : "generation —");
+  setText("document-count", get(store, "document_count") ?? 0);
+  setText("chunk-count", get(store, "chunk_count") ?? 0);
+  setText("user-count", get(store, "active_user_count") ?? 0);
+  setText("lifecycle-badge", life);
+  setText("controller-state", get(snapshot, "controller.lifecycle_state", "controller.phase") ?? "connected");
+  setText("controller-generation", get(snapshot, "controller.lifecycle_generation") ?? gen);
+  setText("temporal-status", snapshot.temporal_available === false ? "unavailable" : "connected");
+  setText("backend-badge", get(snapshot, "search_backend") ?? "lakebase_hybrid");
+  const quotaStarted = state.events.some((event) => event.event_type === "quota_wait_started");
+  const quotaDone = state.events.some((event) => event.event_type === "quota_wait_completed");
+  setText("quota-state", quotaDone ? "recovered" : quotaStarted ? "retrying" : "armed");
+  const held = state.events.some((event) => event.event_type === "document_commit_held");
+  const released = Boolean(control.release_requested);
+  const fenced = gen >= Number(get(snapshot, "run.baseline_generation") ?? 7) + 1;
+  $("sync").disabled = life !== "active" || hasActiveOperation("sync");
+  $("ask").disabled = life !== "active" || Number(get(store, "document_count") ?? 0) < 1;
+  $("deactivate").disabled = !(held && ["active", "deactivation_failed"].includes(life)) || hasActiveOperation("deactivation");
+  $("deactivate").textContent = life === "deactivation_failed" ? "Retry deactivation" : "Commit generation fence";
+  $("release").disabled = !(held && fenced && !released);
+  $("load-proof").disabled = !state.runId;
+  $("copy-proof").disabled = !state.proofQuery;
+  setText("hold-state", released ? "released" : held ? "held before commit" : "armed");
+  setText("release-hint", fenced ? "Fence committed" : "Waiting for generation fence");
+  setText("late-write-result", state.events.some((event) => event.event_type === "stale_generation_rejected") ? "Lakebase rejected expected generation 7; actual generation 8." : released ? "Late writer released; waiting for Lakebase verdict." : held ? "Document is held immediately before commit." : "Waiting for the held document and fence.");
   setText("last-updated", `Updated ${new Date().toLocaleTimeString()}`);
-  setText("connection-banner", `Lakebase authoritative · ${lifecycle} · generation ${databaseGeneration}`);
+  renderWorkflows(snapshot);
+  activateStep(inferredStep());
 }
 
-function workflowGroups(snapshot) {
-  const explicit = value(
-    snapshot,
-    "workflows",
-    "workflow_groups",
-    "active_workflows",
-    "controller.workflows",
-    "controller.active_workflows",
-  );
-  if (explicit) return explicit;
-  const controller = controllerSnapshot(snapshot);
-  const groups = {};
-  const controllerId = value(controller, "controller_workflow_id");
-  const syncIds = value(controller, "active_sync_ids") ?? [];
-  const remediationIds = value(controller, "active_remediation_ids") ?? [];
-  const deactivationId = value(controller, "active_deactivation_id");
-  const quotaIds = value(controller, "quota_workflow_ids") ?? [];
-  const ingestionIds = [
-    ...new Set(
-      state.events
-        .filter((event) => String(value(event, "event_type", "type") ?? "").includes("document"))
-        .map((event) => value(event, "workflow_id"))
-        .filter(Boolean),
-    ),
-  ];
-  if (controllerId) groups.controller = [controllerId];
-  if (syncIds.length) groups["sync fan-out"] = syncIds;
-  if (quotaIds.length) groups.quota = quotaIds;
-  if (ingestionIds.length) groups.ingestion = ingestionIds;
-  if (remediationIds.length) groups.remediation = remediationIds;
-  if (deactivationId) groups.deactivation = [deactivationId];
-  return groups;
-}
-
-function renderWorkflowGroups(groups, snapshot) {
-  const container = element("workflow-groups");
-  container.replaceChildren();
-  const entries = Array.isArray(groups)
-    ? [["workflows", groups]]
-    : Object.entries(groups).filter(([, workflows]) => Array.isArray(workflows) && workflows.length);
-  if (!entries.length) {
-    const empty = document.createElement("p");
-    empty.className = "empty-state";
-    empty.textContent = "Workflow activity will appear after sync begins.";
-    container.append(empty);
-    return;
-  }
-  for (const [groupName, workflows] of entries) {
-    const section = document.createElement("section");
-    section.className = "workflow-group";
-    const heading = document.createElement("h3");
-    heading.textContent = String(groupName).replaceAll("_", " ");
-    section.append(heading);
-    for (const workflow of workflows) {
-      const workflowId = typeof workflow === "string" ? workflow : value(workflow, "workflow_id", "id");
-      if (!workflowId) continue;
-      const href =
-        (typeof workflow === "object" ? value(workflow, "temporal_url", "url") : null) ??
-        snapshot?.workflow_links?.[workflowId];
-      const item = safeWorkflowLink(workflowId, href);
-      section.append(item);
+function renderWorkflows(snapshot) {
+  const controller = snapshot?.controller ?? {};
+  const groups = {
+    controller: controller.controller_workflow_id ? [controller.controller_workflow_id] : [],
+    sync: controller.active_sync_ids ?? [],
+    quota: controller.quota_workflow_ids ?? [],
+    ingestion: [...new Set(state.events.map((event) => event.workflow_id).filter(Boolean))],
+    deactivation: controller.active_deactivation_id ? [controller.active_deactivation_id] : [],
+  };
+  const container = $("workflow-groups"); container.replaceChildren();
+  for (const [name, ids] of Object.entries(groups)) {
+    if (!ids.length) continue;
+    const group = document.createElement("section"); group.className = "workflow-group";
+    const title = document.createElement("b"); title.textContent = name; group.append(title);
+    for (const id of ids) {
+      const link = document.createElement(snapshot.workflow_links?.[id] ? "a" : "span");
+      link.className = snapshot.workflow_links?.[id] ? "workflow-link" : "workflow-id";
+      link.textContent = id;
+      if (link instanceof HTMLAnchorElement) { link.href = snapshot.workflow_links[id]; link.target = "_blank"; link.rel = "noreferrer"; }
+      group.append(link);
     }
-    container.append(section);
+    container.append(group);
   }
-}
-
-function safeWorkflowLink(workflowId, candidate) {
-  if (candidate) {
-    try {
-      const url = new URL(candidate, window.location.origin);
-      if (url.protocol === "https:" || url.protocol === "http:") {
-        const anchor = document.createElement("a");
-        anchor.className = "workflow-link";
-        anchor.textContent = workflowId;
-        anchor.href = url.href;
-        anchor.target = "_blank";
-        anchor.rel = "noreferrer";
-        return anchor;
-      }
-    } catch {
-      // Fall through to plain text when a service returns a malformed deep link.
-    }
-  }
-  const text = document.createElement("span");
-  text.className = "workflow-id";
-  text.textContent = workflowId;
-  return text;
+  if (!container.children.length) container.textContent = "No workflows yet.";
 }
 
 function renderEvents(events) {
   state.events = events;
-  const timeline = element("event-timeline");
-  timeline.replaceChildren();
-  setText("event-count", `${events.length} event${events.length === 1 ? "" : "s"}`);
-  if (!events.length) {
-    const empty = document.createElement("li");
-    empty.className = "empty-state";
-    empty.textContent = "Presentation events will appear here.";
-    timeline.append(empty);
-    return;
-  }
+  const list = $("event-timeline"); list.replaceChildren();
   for (const event of events) {
-    const eventType = String(value(event, "event_type", "type") ?? "event");
-    const item = document.createElement("li");
-    item.className = "event";
-    if (
-      eventType.includes("generation") ||
-      eventType.includes("deactivation_started") ||
-      eventType === "deactivation_fenced"
-    ) {
-      item.classList.add("event-fence");
-    }
-    if (eventType.includes("stale_generation_rejected")) item.classList.add("event-stale");
-    const title = document.createElement("p");
-    title.className = "event-title";
-    title.textContent = eventType.replaceAll("_", " ");
-    const metadata = document.createElement("p");
-    metadata.className = "event-meta";
-    const timestamp = value(event, "occurred_at", "created_at", "timestamp");
-    const expected = value(event, "details.expected_generation", "expected_generation");
-    const actual = value(event, "details.actual_generation", "actual_generation");
-    const details = expected !== undefined && actual !== undefined ? ` · expected ${expected}, actual ${actual}` : "";
-    metadata.textContent = `${timestamp ? new Date(timestamp).toLocaleTimeString() : "event"}${details}`;
-    item.append(title, metadata);
-    timeline.append(item);
+    const item = document.createElement("li"); item.className = `event ${event.event_type === "stale_generation_rejected" ? "event-stale" : ""}`;
+    const labels = { quota_injected: "Demo-injected Drive throttle", quota_wait_started: "Temporal waiting durably", quota_wait_completed: "Drive scan resumed", document_commit_held: "Late writer held before commit", deactivation_fenced: "Generation 8 became authoritative", stale_generation_rejected: "Lakebase rejected the stale write", store_inactive: "Cleanup complete; store inactive" };
+    const title = document.createElement("p"); title.className = "event-title"; title.textContent = labels[event.event_type] ?? String(event.event_type ?? "event").replaceAll("_", " ");
+    const meta = document.createElement("p"); meta.className = "event-meta"; meta.textContent = `${event.created_at ? new Date(event.created_at).toLocaleTimeString() : "event"}${event.expected_generation !== null && event.actual_generation !== null ? ` · expected ${event.expected_generation}, actual ${event.actual_generation}` : ""}`;
+    item.append(title, meta); list.append(item);
   }
-  timeline.scrollTop = timeline.scrollHeight;
+  if (!events.length) { const item = document.createElement("li"); item.textContent = "No events yet."; list.append(item); }
+  setText("event-count", `${events.length} event${events.length === 1 ? "" : "s"}`);
+}
+
+function renderFiles(files) {
+  const list = $("source-files"); list.replaceChildren();
+  for (const file of files) {
+    const item = document.createElement("li");
+    const details = document.createElement("span");
+    const sourceUrl = safeHttpUrl(file.source_uri);
+    const name = document.createElement(sourceUrl ? "a" : "b"); name.textContent = file.name;
+    if (sourceUrl && name instanceof HTMLAnchorElement) { name.href = sourceUrl; name.target = "_blank"; name.rel = "noreferrer"; }
+    const metadata = document.createElement("small"); metadata.textContent = `${file.mime_type ?? "unknown type"} · ${file.modified_time ?? "unknown version"}`;
+    details.append(name, metadata);
+    const status = document.createElement("span"); status.textContent = file.held_for_demo ? "held writer" : file.searchable ? "searchable" : "skipped"; if (file.held_for_demo) status.className = "held";
+    item.append(details, status); list.append(item);
+  }
+  if (!files.length) { const item = document.createElement("li"); item.textContent = "No searchable files found."; list.append(item); }
 }
 
 function renderAnswer(answer) {
-  const answerBox = element("answer-result");
-  answerBox.replaceChildren();
-  const text = document.createElement("p");
-  text.textContent = value(answer, "answer", "text") ?? "No evidence-backed answer was returned.";
-  answerBox.append(text);
-  const backend = value(answer, "backend", "search_backend");
-  if (backend) setText("backend-badge", backend);
-  const citedGeneration = value(answer, "committed_generation", "lifecycle_generation", "generation");
-  if (citedGeneration !== undefined) {
-    const note = document.createElement("p");
-    note.className = "hint";
-    note.textContent = `Evidence committed at generation ${citedGeneration}`;
-    answerBox.append(note);
-  }
-  renderCitations(value(answer, "hits", "citations", "evidence") ?? []);
-}
-
-function renderCitations(citations) {
-  const list = element("citations");
-  list.replaceChildren();
-  for (const [index, citation] of citations.entries()) {
-    const item = document.createElement("li");
-    item.className = "citation";
-    const heading = document.createElement("div");
-    heading.className = "citation-title";
-    const titleText = `${index + 1}. ${value(citation, "title", "document_title", "document_key") ?? "Evidence"}`;
-    const title = safeCitationTitle(titleText, value(citation, "source_uri"));
-    const score = document.createElement("span");
-    const rawScore = value(citation, "score", "rank");
-    score.textContent = rawScore === undefined ? "" : Number(rawScore).toFixed(3);
-    heading.append(title, score);
-    const snippet = document.createElement("p");
-    snippet.textContent = value(citation, "snippet", "text") ?? "";
-    item.append(heading, snippet);
-    list.append(item);
+  setText("answer-result", answer.answer ?? "No evidence-backed answer was returned.");
+  setText("backend-badge", answer.backend ?? "lakebase_hybrid");
+  const list = $("citations"); list.replaceChildren();
+  for (const hit of answer.hits ?? []) {
+    const item = document.createElement("li"); item.className = "citation";
+    const title = document.createElement("p"); title.className = "citation-title";
+    const sourceUrl = safeHttpUrl(hit.source_uri);
+    const titleNode = document.createElement(sourceUrl ? "a" : "span"); titleNode.textContent = hit.title;
+    if (sourceUrl && titleNode instanceof HTMLAnchorElement) { titleNode.href = sourceUrl; titleNode.target = "_blank"; titleNode.rel = "noreferrer"; }
+    title.append(titleNode);
+    const meta = document.createElement("p"); meta.className = "citation-meta"; meta.textContent = `BM25 ${hit.keyword_rank ?? "—"} · vector ${hit.vector_rank ?? "—"} · RRF ${Number(hit.score).toFixed(4)} · generation ${hit.committed_generation ?? answer.lifecycle_generation}`;
+    const text = document.createElement("p"); text.className = "citation-text"; text.textContent = hit.text;
+    item.append(title, meta, text); list.append(item);
   }
 }
 
-function safeCitationTitle(title, candidate) {
-  if (candidate) {
-    try {
-      const url = new URL(candidate);
-      if (url.protocol === "https:" || url.protocol === "http:") {
-        const anchor = document.createElement("a");
-        anchor.textContent = title;
-        anchor.href = url.href;
-        anchor.target = "_blank";
-        anchor.rel = "noreferrer";
-        return anchor;
-      }
-    } catch {
-      // Render a text label when an adapter returns an invalid or unsafe citation URI.
-    }
-  }
-  const label = document.createElement("span");
-  label.textContent = title;
-  return label;
-}
-
-function trackOperation(operation) {
-  const operationId = value(operation, "operation_id", "id", "workflow_id");
-  if (!operationId) return;
-  state.operations.set(operationId, operation);
-  renderOperations();
-}
-
-function renderOperations() {
-  const container = element("operations");
-  container.replaceChildren();
-  for (const [operationId, operation] of state.operations) {
-    const row = document.createElement("div");
-    row.className = "operation-row";
-    const id = document.createElement("span");
-    id.textContent = operationId;
-    const status = document.createElement("strong");
-    status.textContent = value(operation, "status", "state") ?? "accepted";
-    row.append(id, status);
-    container.append(row);
-  }
-}
-
-async function refreshOperation(operationId) {
+function setReadiness(id, ready) { const node = $(id); node.textContent = ready ? "ready" : "blocked"; node.className = ready ? "ready" : "blocked"; }
+async function loadPlatformReadiness() {
   try {
-    const operation = await api(`/api/operations/${encodeURIComponent(operationId)}`);
-    state.operations.set(operationId, operation);
-  } catch (error) {
-    if (error.status !== 404) showError(error);
+    const response = await fetch("/readyz", { headers: { Accept: "application/json" } });
+    const payload = await response.json();
+    const databaseReady = Boolean(get(payload, "database_ready", "database.ready") && get(payload, "migrations_ready", "migrations.current"));
+    const temporalReady = Boolean(get(payload, "temporal_ready", "temporal.ready"));
+    const searchReady = Boolean(get(payload, "search_ready") ?? (payload.ready && get(payload, "details.search_backend") === "lakebase_hybrid"));
+    const embeddingsReady = Boolean(get(payload, "embeddings_ready") ?? payload.ready);
+    setReadiness("ready-lakebase", databaseReady); setReadiness("ready-search", searchReady); setReadiness("ready-embeddings", embeddingsReady); setReadiness("ready-temporal", temporalReady);
+    $("preflight").disabled = !(response.ok && payload.ready);
+    setText("preflight-status", response.ok && payload.ready ? "Platform ready. Inspect the stable folder." : "Preflight blocked until every dependency is ready.");
+  } catch {
+    for (const id of ["ready-lakebase", "ready-search", "ready-embeddings", "ready-temporal"]) setReadiness(id, false);
+    $("preflight").disabled = true;
+    setText("preflight-status", "Platform readiness is unavailable.");
   }
+}
+
+async function pollPreflight() {
+  if (!state.preflightWorkflowId) return;
+  const payload = await api(`/api/preflight/${encodeURIComponent(state.preflightWorkflowId)}`);
+  setText("preflight-status", payload.status === "completed" ? `Connected · ${payload.result?.files?.length ?? 0} files · ${payload.result?.folders_scanned ?? 0} folders` : `Temporal preflight: ${payload.status}`);
+  if (payload.status === "completed") { renderFiles(payload.result?.files ?? []); $("new-run").disabled = false; activateStep("sync"); }
 }
 
 async function refresh() {
-  if (!state.runId || state.polling) return;
-  state.polling = true;
   try {
-    const [snapshot, events] = await Promise.all([
-      api(`/api/demo/runs/${encodeURIComponent(state.runId)}/snapshot`),
-      api(`/api/demo/runs/${encodeURIComponent(state.runId)}/events?limit=200`),
-    ]);
-    renderEvents(events.events ?? []);
-    renderSnapshot(snapshot);
-    await Promise.all([...state.operations.keys()].map(refreshOperation));
+    if (state.preflightWorkflowId) await pollPreflight();
+    if (!state.runId) return;
+    const [snapshot, eventPayload] = await Promise.all([api(`/api/demo/runs/${state.runId}/snapshot`), api(`/api/demo/runs/${state.runId}/events?limit=500`)]);
+    renderEvents(eventPayload.events ?? []); renderSnapshot(snapshot);
+    for (const [id] of state.operations) {
+      const operation = await api(`/api/operations/${encodeURIComponent(id)}`); state.operations.set(id, operation);
+    }
     renderOperations();
-    clearError();
-  } catch (error) {
-    showError(error);
-    setText("connection-banner", "Latest state unavailable; showing the last authoritative snapshot.");
-  } finally {
-    state.polling = false;
-  }
+  } catch (error) { showError(error); }
 }
 
-async function postAction(buttonId, path, action, busyLabel, body = {}) {
-  const button = element(buttonId);
-  setBusy(button, true, busyLabel);
-  clearError();
-  try {
-    const result = await api(path, {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey(action) },
-      body: JSON.stringify(body),
-    });
-    trackOperation(result);
-    await refresh();
-    return result;
-  } catch (error) {
-    showError(error);
-    return null;
-  } finally {
-    setBusy(button, false);
-    if (state.snapshot) renderSnapshot(state.snapshot);
-  }
+function renderOperations() {
+  const container = $("operations"); container.replaceChildren();
+  for (const operation of state.operations.values()) { const row = document.createElement("div"); row.className = "operation-row"; const name = document.createElement("span"); name.textContent = operation.operation_type; const status = document.createElement("b"); status.textContent = operation.status; row.append(name, status); container.append(row); }
+  if (!container.children.length) container.textContent = "No operations yet.";
 }
 
-async function createRun() {
-  const button = element("new-run");
-  setBusy(button, true, "Creating…");
-  clearError();
-  try {
-    const run = await api("/api/demo/runs", {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey("create-run") },
-      body: "{}",
-    });
-    state.runId = value(run, "run_id", "id");
-    if (!state.runId) throw new Error("The service did not return a run identifier.");
-    state.events = [];
-    state.operations.clear();
-    persistRunId(state.runId);
-    setText("run-label", `run ${state.runId}`);
-    await refresh();
-  } catch (error) {
-    showError(error);
-  } finally {
-    setBusy(button, false);
-  }
-}
+async function runAction(button, label, action) { clearError(); setBusy(button, true, label); try { await action(); } catch (error) { showError(error); } finally { setBusy(button, false); await refresh(); } }
 
-function runPath(suffix) {
-  return `/api/demo/runs/${encodeURIComponent(state.runId)}${suffix}`;
-}
+$("preflight").addEventListener("click", () => runAction($("preflight"), "Inspecting…", async () => { const result = await api("/api/preflight", { method: "POST", headers: { "Idempotency-Key": idempotencyKey("preflight") } }); state.preflightWorkflowId = result.workflow_id; safeStorageSet("retrieval-demo-preflight-id", result.workflow_id); setText("preflight-status", "Temporal preflight started."); }));
+$("new-run").addEventListener("click", () => runAction($("new-run"), "Creating…", async () => { const run = await api("/api/demo/runs", { method: "POST", headers: { "Idempotency-Key": idempotencyKey("new-run") } }); state.runId = run.run_id; state.events = []; state.operations.clear(); safeStorageSet("retrieval-demo-run-id", run.run_id); activateStep("sync"); }));
+$("sync").addEventListener("click", () => runAction($("sync"), "Starting…", async () => { const operation = await api(`/api/demo/runs/${state.runId}/sync`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("sync") } }); state.operations.set(operation.operation_id, operation); }));
+$("ask").addEventListener("click", () => runAction($("ask"), "Retrieving…", async () => { const answer = await api(`/api/demo/runs/${state.runId}/ask`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("ask") }, body: JSON.stringify({ question: $("question").value }) }); renderAnswer(answer); activateStep("retrieve"); }));
+$("deactivate").addEventListener("click", () => runAction($("deactivate"), "Fencing…", async () => { const operation = await api(`/api/demo/runs/${state.runId}/deactivate`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("deactivate") } }); state.operations.set(operation.operation_id, operation); activateStep("deactivate"); }));
+$("release").addEventListener("click", () => runAction($("release"), "Releasing…", async () => { await api(`/api/demo/runs/${state.runId}/controls/release`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("release") } }); activateStep("reject"); }));
+$("load-proof").addEventListener("click", () => runAction($("load-proof"), "Loading…", async () => { const proof = await api(`/api/demo/runs/${state.runId}/proof`); state.proofQuery = proof.proof_query ?? null; $("copy-proof").disabled = !state.proofQuery; $("proof-result").textContent = JSON.stringify(proof, null, 2); activateStep("recap"); }));
+$("copy-proof").addEventListener("click", () => runAction($("copy-proof"), "Copying…", async () => { if (!state.proofQuery) throw new Error("Load Lakebase proof first."); await navigator.clipboard.writeText(state.proofQuery); }));
 
-element("new-run").addEventListener("click", createRun);
-element("sync").addEventListener("click", () =>
-  postAction("sync", runPath("/sync"), "sync", "Submitting…"),
-);
-element("deactivate").addEventListener("click", () =>
-  postAction("deactivate", runPath("/deactivate"), "deactivate", "Submitting…"),
-);
-element("hold").addEventListener("click", () =>
-  postAction("hold", runPath("/controls/hold"), "hold", "Arming…"),
-);
-element("release").addEventListener("click", () =>
-  postAction("release", runPath("/controls/release"), "release", "Releasing…"),
-);
-element("ask").addEventListener("click", async () => {
-  const question = element("question").value.trim();
-  if (question.length < 3) {
-    showError(new Error("Enter a question with at least three characters."));
-    return;
-  }
-  const answer = await postAction("ask", runPath("/ask"), "ask", "Searching…", { question });
-  if (answer) renderAnswer(answer);
-});
+for (const item of document.querySelectorAll(".story-rail li")) item.addEventListener("click", () => { activateStep(item.dataset.step); $(`${item.dataset.step}-card`)?.scrollIntoView({ behavior: "smooth", block: "center" }); });
+function setDrawer(open) { $("technical-drawer").classList.toggle("open", open); $("technical-drawer").setAttribute("aria-hidden", String(!open)); $("drawer-toggle").setAttribute("aria-expanded", String(open)); }
+$("drawer-toggle").addEventListener("click", () => setDrawer(!$("technical-drawer").classList.contains("open")));
+$("drawer-close").addEventListener("click", () => setDrawer(false));
 
-if (state.runId) {
-  setText("run-label", `run ${state.runId}`);
-  void refresh();
-}
-window.setInterval(() => void refresh(), 1000);
+async function loadTooling() { try { const links = await api("/api/demo/tooling"); for (const [id, key] of [["drive-link", "google_drive"], ["temporal-link", "temporal"], ["lakebase-link", "lakebase"]]) { if (links[key]) $(id).href = links[key]; else { $(id).removeAttribute("href"); $(id).setAttribute("aria-disabled", "true"); } } } catch { /* drawer still works */ } }
+loadPlatformReadiness(); loadTooling(); refresh(); state.pollTimer = window.setInterval(refresh, 1200);

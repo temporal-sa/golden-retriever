@@ -8,6 +8,7 @@ import hashlib
 from temporalio import activity
 
 from retrieval.content import InvalidDocumentPayloadError, chunk_text, parse_staged_document
+from retrieval.embeddings import EmbeddingProvider
 from retrieval.temporal.common.metrics import (
     INGESTION_RESULTS,
     STALE_GENERATION_REJECTIONS,
@@ -82,11 +83,13 @@ class IngestionActivities:
         *,
         before_commit: BeforeDocumentCommitHook | None = None,
         event_sink: IngestionEventSink | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
         self._repository = repository
         self._staging_store = staging_store
         self._before_commit = before_commit or NoopBeforeDocumentCommitHook()
         self._event_sink = event_sink or NoopIngestionEventSink()
+        self._embedding_provider = embedding_provider
 
     @activity.defn(name="ingest_staged_document")
     async def ingest_staged_document(
@@ -118,14 +121,37 @@ class IngestionActivities:
                     body,
                     fallback_title=command.document.document_key,
                 )
+                parsed_chunks = tuple(chunk_text(parsed.text))
+                embeddings: tuple[tuple[float, ...], ...] | tuple[None, ...]
+                embedding_model: str | None
+                if self._embedding_provider is None:
+                    embeddings = (None,) * len(parsed_chunks)
+                    embedding_model = None
+                else:
+                    _heartbeat("embedding-document-chunks")
+                    embeddings = await self._embedding_provider.embed(
+                        [chunk.text for chunk in parsed_chunks]
+                    )
+                    if len(embeddings) != len(parsed_chunks):
+                        raise RuntimeError(
+                            "embedding provider returned the wrong number of vectors"
+                        )
+                    embedding_model = self._embedding_provider.identity
+                    _heartbeat("embedded-document-chunks")
                 searchable = SearchableDocument(
                     reference=command.document,
                     title=parsed.title,
                     source_uri=parsed.source_uri,
                     body_hash=content_hash,
                     chunks=tuple(
-                        SearchChunk(chunk.ordinal, chunk.text, chunk.content_hash)
-                        for chunk in chunk_text(parsed.text)
+                        SearchChunk(
+                            chunk.ordinal,
+                            chunk.text,
+                            chunk.content_hash,
+                            embedding=embedding,
+                            embedding_model=embedding_model,
+                        )
+                        for chunk, embedding in zip(parsed_chunks, embeddings, strict=True)
                     ),
                 )
                 await self._before_commit.wait(command)

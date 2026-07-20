@@ -20,6 +20,7 @@ from retrieval.demo.scripted_provider import ScriptedNorthstarProvider
 from retrieval.demo.store import InMemoryDemoStateStore
 from retrieval.temporal.activities.provider_api import (
     ListActiveUsersRequest,
+    ProviderPreflightRequest,
     ProviderQuotaExhausted,
 )
 
@@ -98,6 +99,37 @@ async def test_scripted_provider_raises_once_then_returns_stable_user() -> None:
         "quota_wait_started",
         "quota_wait_completed",
     ]
+
+
+async def test_scripted_provider_supports_local_preflight() -> None:
+    scenario = load_northstar_scenario()
+    store = InMemoryDemoStateStore()
+    provider = ScriptedNorthstarProvider(scenario, store)
+
+    result = await provider.preflight(ProviderPreflightRequest("preflight-local", max_files=2))
+
+    assert result.provider == "scripted"
+    assert len(result.files) == 2
+    assert result.truncated is True
+
+
+async def test_terminal_preflight_state_cannot_regress() -> None:
+    store = InMemoryDemoStateStore()
+    await store.start()
+    completed = await store.put_preflight(
+        request_id="request-1",
+        workflow_id="workflow-1",
+        status="completed",
+        result={"files": []},
+    )
+
+    replayed = await store.put_preflight(
+        request_id="request-1",
+        workflow_id="workflow-1",
+        status="running",
+    )
+
+    assert replayed == completed
 
 
 async def test_api_receipt_rejects_conflicting_key_reuse() -> None:
