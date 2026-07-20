@@ -30,12 +30,14 @@ Passing a lower level never implies the next level.
 | Deactivation | Fence, cancel, drain, user cleanup, bounded object cleanup, zero-row finish |
 | Retrieval | Deterministic chunking and current-generation Postgres full-text search |
 | Demo adapters | Manifest-verified fixtures and scripted quota/hold controls |
+| Google Drive adapter | Read-only API client, recursive text export, shared staging, and deletion reconciliation |
 | App | FastAPI API, durable HTTP idempotency, browser UI, liveness/readiness |
 | Packaging | Databricks Asset Bundle, App image, and separate worker image |
 | Change safety | Unit/contract/App/demo tests, integration harness, and replay histories |
 
-Northstar fixtures replace a durable object store and real provider. They prove the orchestration
-and safety story, not production data integration.
+Northstar fixtures still prove the deterministic demonstration, not production data integration.
+The Google Drive adapter is a real provider implementation, but each deployment must separately
+validate its identity, shared staging volume, source scope, retention, and representative load.
 
 ## Source verification gate
 
@@ -73,7 +75,8 @@ Use the [deployment runbook](runbooks/deploy-lakebase-temporal-demo.md) for the 
 
 ## Production adapters and data lifecycle
 
-Replace demo adapters with implementations that prove these contracts:
+Replace demo adapters with implementations that prove these contracts. The Google Drive bundle
+provides one provider/staging implementation; its deployment evidence is still environment-specific.
 
 | Boundary | Required evidence |
 |---|---|

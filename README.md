@@ -25,6 +25,8 @@ store, and proves that the late write cannot cross the database generation fence
 - deploy the App with a Databricks Asset Bundle and deploy the worker independently;
 - inspect forward-only database migrations, least-privilege grants, replay histories, and
   production-readiness gates;
+- synchronize Google Docs, Sheets, Slides, and uploaded text files through the read-only Google
+  Drive adapter;
 - adapt the workflow and repository ports to a real provider and staging system.
 
 The Northstar provider and its documents are demonstration fixtures. They are not a customer-data
@@ -62,6 +64,7 @@ the [workflow topology](docs/workflow-topology.md) for diagrams.
 |---|---|
 | `src/retrieval/temporal` | Temporal clients, workflows, Activities, worker, and runtime configuration |
 | `src/retrieval/lakebase` | Postgres connection pool, repository, search, migrations, and grants |
+| `src/retrieval/google_drive` | Drive API client, provider gateway, shared staging, and Lakebase worker bundle |
 | `src/retrieval/demo` | Northstar fixtures, scripted provider, durable controls/events, and demo service |
 | `apps/retrieval_demo` | FastAPI API, browser UI, and Databricks bundle |
 | `tests` | unit, contract, App, integration, replay, and load tests |
@@ -86,6 +89,9 @@ Additional paths need:
 - a TLS-enabled Lakebase/Postgres database for the complete stack;
 - Databricks CLI `>=0.299.0` and an OAuth profile for Databricks deployment;
 - Docker or another OCI builder for worker/App images.
+
+The production [Google Drive integration guide](docs/google-drive-integration.md) covers its
+read-only OAuth scope, supported file types, shared staging requirement, and worker configuration.
 
 Install the locked development environment:
 

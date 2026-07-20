@@ -15,6 +15,7 @@ and the quickest ways to run or test the project.
 | Run the demo locally | [Root README](../README.md#run-the-complete-demo-locally), then [App guide](../apps/retrieval_demo/README.md) |
 | Deploy to Databricks | [Databricks deployment runbook](runbooks/deploy-lakebase-temporal-demo.md) |
 | Deploy through tmprl-demo.cloud | [tmprl-demo.cloud runbook](runbooks/deploy-tmprl-demo-cloud.md) |
+| Connect Google Drive | [Google Drive integration](google-drive-integration.md) |
 | Change database schemas | [Migration and rollback runbook](runbooks/migration-and-rollback.md) |
 | Evaluate production readiness | [Production-readiness guide](architecture-production-readiness.md) |
 | Operate dashboards and alerts | [Metrics and observability](operations/metrics.md) |

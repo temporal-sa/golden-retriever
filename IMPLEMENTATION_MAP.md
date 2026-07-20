@@ -35,6 +35,7 @@ scenario are unfamiliar.
 | `src/retrieval/temporal/activities` | External-I/O boundaries and adapter protocols |
 | `src/retrieval/temporal/workflows` | Deterministic Workflow implementations |
 | `src/retrieval/lakebase` | Postgres config/pool, repository, search, migrations, and grants |
+| `src/retrieval/google_drive` | Read-only Drive client, recursive provider, shared staging, reconciliation, and worker bundle |
 | `src/retrieval/demo` | Northstar scenario, scripted provider, controls, events, hold gate, and service |
 | `apps/retrieval_demo` | FastAPI routes, static UI, App manifest, and Databricks bundle |
 | `tests` | Default and opt-in verification suites |
@@ -95,8 +96,8 @@ ports and hooks:
 | Port or hook | Included implementations |
 |---|---|
 | `RetrievalRepository` | in-memory repository; `LakebaseRetrievalRepository` |
-| `StagingStore` | in-memory staging; manifest-restricted fixture staging |
-| `ProviderGateway` | empty local provider; scripted Northstar provider |
+| `StagingStore` | in-memory staging; manifest-restricted fixture staging; content-addressed Drive staging |
+| `ProviderGateway` | empty local provider; scripted Northstar provider; read-only Google Drive provider |
 | `BeforeDocumentCommitHook` | no-op; bounded Northstar pre-commit hold |
 | `IngestionEventSink` | no-op; durable Northstar event sink |
 
@@ -106,6 +107,10 @@ shutdown. The Northstar worker selects its bundle with:
 ```text
 RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle
 ```
+
+The Google Drive + Lakebase bundle is `retrieval.google_drive.bundle:create_adapter_bundle`. See the
+[Google Drive integration guide](docs/google-drive-integration.md) for authentication, staging,
+supported MIME types, reconciliation, and sync metadata.
 
 Adapter configuration is fail-closed. Choose exactly one of these modes:
 
@@ -176,6 +181,25 @@ secrets.
 
 `TEMPORAL_WORKER_DEPLOYMENT_NAME` and `TEMPORAL_WORKER_BUILD_ID` are fallback names for platforms
 that inject Worker Controller conventions. The primary names above take precedence.
+
+### Google Drive variables
+
+These variables apply when `RETRIEVAL_ADAPTER_BUNDLE_FACTORY` is
+`retrieval.google_drive.bundle:create_adapter_bundle`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GOOGLE_DRIVE_CREDENTIAL_KEY` | required | Opaque shared-quota identity; never a credential value |
+| `GOOGLE_DRIVE_USER_KEY` | credential key | Stable opaque provider user identity |
+| `GOOGLE_DRIVE_STAGING_DIRECTORY` | required | Absolute shared path for staged content and sync checkpoints |
+| `GOOGLE_DRIVE_ROOT_FOLDER_ID` | unset | Optional folder subtree; unset lists every visible Drive file |
+| `GOOGLE_DRIVE_CREDENTIALS_FILE` | ADC | Optional absolute service-account JSON secret path |
+| `GOOGLE_DRIVE_SUBJECT` | unset | Optional delegated Workspace user for domain-wide delegation |
+| `GOOGLE_DRIVE_MAX_FILE_BYTES` | `10485760` | Maximum downloaded source body size |
+| `GOOGLE_DRIVE_REQUEST_TIMEOUT` | `60` | Drive HTTP request timeout in seconds |
+
+See the [Google Drive integration guide](docs/google-drive-integration.md) before selecting a
+staging volume or authentication mode.
 
 ### Workflow limits
 

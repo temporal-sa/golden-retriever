@@ -93,6 +93,14 @@ class InvalidCredentialsError(RuntimeError):
     pass
 
 
+class ProviderRequestError(RuntimeError):
+    """A provider rejected a request that retrying cannot repair."""
+
+    def __init__(self, message: str, *, error_type: str = "ProviderRequestRejected") -> None:
+        super().__init__(message)
+        self.error_type = error_type
+
+
 class ProviderGateway(Protocol):
     async def list_active_users(self, request: ListActiveUsersRequest) -> ActiveUsersPage: ...
 
@@ -142,6 +150,9 @@ class ProviderActivities:
         except InvalidCredentialsError as exc:
             metrics.increment(PROVIDER_REQUESTS, attributes={"status": "invalid_credentials"})
             raise ApplicationError(str(exc), type="InvalidCredentials", non_retryable=True) from exc
+        except ProviderRequestError as exc:
+            metrics.increment(PROVIDER_REQUESTS, attributes={"status": "rejected"})
+            raise ApplicationError(str(exc), type=exc.error_type, non_retryable=True) from exc
         except Exception:
             metrics.increment(PROVIDER_REQUESTS, attributes={"status": "failed"})
             raise
@@ -171,6 +182,9 @@ class ProviderActivities:
         except InvalidCredentialsError as exc:
             metrics.increment(PROVIDER_REQUESTS, attributes={"status": "invalid_credentials"})
             raise ApplicationError(str(exc), type="InvalidCredentials", non_retryable=True) from exc
+        except ProviderRequestError as exc:
+            metrics.increment(PROVIDER_REQUESTS, attributes={"status": "rejected"})
+            raise ApplicationError(str(exc), type=exc.error_type, non_retryable=True) from exc
         except Exception:
             metrics.increment(PROVIDER_REQUESTS, attributes={"status": "failed"})
             raise
