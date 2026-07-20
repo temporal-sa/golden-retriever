@@ -164,6 +164,10 @@ Confirm `spec.source.branch` points at the source revision/branch containing the
 worker, migrations, and lock file. Merging the resource triggers source reconciliation, image
 builds, Temporal provisioning, Worker Controller rollout, ingress, and readiness promotion.
 
+To request another source build after changing external configuration such as AWS secret values,
+push a real repository content change. The registry keys reconciliation to the Flux source
+artifact digest, so an empty commit is intentionally deduplicated and does not start a build.
+
 ## 7. Verify the deployment
 
 After the registry reports the project active:
