@@ -1,0 +1,11 @@
+# Generated/pinned runtime dependencies for Databricks Apps.
+# The editable repository install supplies the retrieval and apps Python packages.
+--editable ../..
+databricks-sdk==0.121.0
+fastapi==0.139.2
+httpx==0.28.1
+psycopg[binary]==3.3.4
+psycopg-pool==3.3.1
+python-dotenv==1.2.2
+temporalio==1.30.0
+uvicorn[standard]==0.51.0

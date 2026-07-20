@@ -1,41 +1,41 @@
-# Temporal Retrieval Workflows
+# Durable retrieval with Temporal and Lakebase
 
-This repository implements a durable retrieval pipeline with the Temporal Python SDK. It
-coordinates provider pagination, document ingestion, shared provider quotas, failed-user
-remediation, and store deactivation while protecting every persistent mutation with a lifecycle
-generation fence.
+This repository demonstrates how to synchronize searchable documents safely when work is slow,
+retried, rate-limited, canceled, or still finishing during deactivation.
 
-The project is a workflow reference implementation, not a complete hosted service. It includes
-Temporal workflows, activities, a Python client, local adapters, and test infrastructure. It does
-not include an HTTP API, a production database adapter, an object-store adapter, or a real provider
-connector.
+The central idea is simple:
 
-## Start here
+- **Temporal** remembers what must happen next and coordinates work across failures.
+- **Lakebase Postgres** stores what is currently true and decides whether each write is still
+  allowed.
+- **The Databricks App** gives people a browser and HTTP API for starting commands and inspecting
+  results.
+- **A separate worker process** runs Temporal workflows and Activities. The App never runs a
+  worker.
 
-A new contributor should read the documentation in this order:
+The repository includes a deterministic demonstration named **Northstar**. It synchronizes five
+documents, pauses once for provider quota, deliberately holds one document write, deactivates the
+store, and proves that the late write cannot cross the database generation fence.
 
-1. This README for setup, commands, and the system's mental model.
-2. [`IMPLEMENTATION_MAP.md`](IMPLEMENTATION_MAP.md) for the source tree, runtime configuration,
-   workflow inventory, IDs, and invariants.
-3. [`docs/workflow-topology.md`](docs/workflow-topology.md) for the execution diagrams and failure
-   boundaries.
-4. [`docs/architecture-production-readiness.md`](docs/architecture-production-readiness.md) before
-   treating the project as production-ready.
-5. [`docs/runbooks/migration-and-rollback.md`](docs/runbooks/migration-and-rollback.md) when
-   preparing a real deployment or upgrade.
+## What you can do with this repository
 
-## Mental model
+- run a no-service rehearsal in a few seconds;
+- run the Temporal workflow hierarchy against a local Temporal server;
+- run the complete App, worker, and Lakebase-backed demonstration;
+- deploy the App with a Databricks Asset Bundle and deploy the worker independently;
+- inspect forward-only database migrations, least-privilege grants, replay histories, and
+  production-readiness gates;
+- synchronize Google Docs, Sheets, Slides, and uploaded text files through the read-only Google
+  Drive adapter;
+- adapt the workflow and repository ports to a real provider and staging system.
 
-Each store has one long-lived `StoreControllerWorkflow`. Applications send it idempotent commands
-through `RetrievalClient`:
+The Northstar provider and its documents are demonstration fixtures. They are not a customer-data
+connector or a production staging service.
 
-- `request_sync` starts one store sync at a time;
-- `cancel_sync` cancels a tracked sync;
-- `start_deactivation` advances the lifecycle generation, drains retrieval work, removes data, and
-  marks the store inactive;
-- `get_status` reports compact controller state.
+## How the system works
 
-A sync walks this hierarchy:
+Every retrieval data set is a **store**. One long-lived `StoreControllerWorkflow` serializes that
+store's sync and deactivation commands. A sync creates a bounded hierarchy of child workflows:
 
 ```text
 StoreControllerWorkflow
@@ -44,35 +44,74 @@ StoreControllerWorkflow
         └── ResourceSyncWorkflow
             └── ResourcePagesWorkflow
                 └── FilesPageWorkflow
-                    └── DocumentIngestionWorkflow (Potentially Optional)
+                    └── DocumentIngestionWorkflow
 ```
 
-Fan-out is bounded and joined at every level. Provider response bodies never enter Workflow Event
-History: workflows carry `DocumentRef` metadata, while the ingestion Activity reads the body from
-a `StagingStore`. Failed page work retains a retry-safe cursor and is sent to a bounded,
-controller-tracked remediation workflow.
+Document bodies do not enter Temporal Workflow Event History. Workflows carry small references;
+an Activity loads each body, verifies it, chunks it, and writes it to Lakebase.
 
-Provider calls can share a `UserQuotaWorkflow` keyed by provider, opaque credential key, and quota
-class. The coordinator grants or explicitly denies permits, tracks reset observations, limits
-in-flight work, and caps its pending queue at 350 requests.
+Each store row has a lifecycle state and a monotonically increasing **generation**. Deactivation
+commits `generation N → N + 1` before cancellation and cleanup. Every mutation checks the expected
+generation inside the same transaction as its write. A late generation-`N` Activity therefore
+fails even if cancellation arrived too late.
 
-Every write checks the store's authoritative lifecycle generation in the same transaction as the
-mutation. Deactivation commits a new generation before requesting cancellation, so late Activity
-completion cannot write into an inactive store.
+See the [system specification](docs/lakebase-temporal-demo-spec.md) for the complete behavior and
+the [workflow topology](docs/workflow-topology.md) for diagrams.
+
+## Repository tour
+
+| Path | What it contains |
+|---|---|
+| `src/retrieval/temporal` | Temporal clients, workflows, Activities, worker, and runtime configuration |
+| `src/retrieval/lakebase` | Postgres connection pool, repository, search, migrations, and grants |
+| `src/retrieval/google_drive` | Drive API client, provider gateway, shared staging, and Lakebase worker bundle |
+| `src/retrieval/demo` | Northstar fixtures, scripted provider, durable controls/events, and demo service |
+| `apps/retrieval_demo` | FastAPI API, browser UI, and Databricks bundle |
+| `tests` | unit, contract, App, integration, replay, and load tests |
+| `docs` | architecture, deployment, migration, operations, and decision guides |
+| `Dockerfile.worker` | long-running worker image |
+| `Dockerfile.app` | standalone App image for tmprl-demo.cloud |
+
+Use the [implementation map](IMPLEMENTATION_MAP.md) when you need exact modules, commands,
+environment variables, workflow names, or database tables.
 
 ## Prerequisites
 
-- Python 3.11 or newer
-- [`uv`](https://docs.astral.sh/uv/)
-- [Temporal CLI](https://docs.temporal.io/cli) for the local development server
+For local development you need:
 
-Install the project and development dependencies:
+- Python 3.11 or newer;
+- [`uv`](https://docs.astral.sh/uv/);
+- Node.js for the JavaScript syntax check in `make verify`.
+
+Additional paths need:
+
+- Temporal CLI for a local Temporal server;
+- a TLS-enabled Lakebase/Postgres database for the complete stack;
+- Databricks CLI `>=0.299.0` and an OAuth profile for Databricks deployment;
+- Docker or another OCI builder for worker/App images.
+
+The production [Google Drive integration guide](docs/google-drive-integration.md) covers its
+read-only OAuth scope, supported file types, shared staging requirement, and worker configuration.
+
+Install the locked development environment:
 
 ```bash
-uv sync --extra dev
+uv sync --frozen --extra dev
 ```
 
-## Fastest local workflow check
+## Run the fastest rehearsal
+
+This command needs no database, Temporal server, or network connection:
+
+```bash
+uv run retrieval-demo-headless --json
+```
+
+A successful result ends with generation 8, state `inactive`, zero documents/chunks, four cited
+documents, and a rejected stale write. This validates the deterministic data-safety story; it does
+not validate a live Temporal or Lakebase environment.
+
+## Run a local Temporal smoke test
 
 Start Temporal in one terminal:
 
@@ -80,152 +119,159 @@ Start Temporal in one terminal:
 temporal server start-dev
 ```
 
-The default frontend is `localhost:7233`; the Web UI is normally
-[http://localhost:8233](http://localhost:8233).
-
-In another terminal, run the executable smoke test:
+Run the self-contained workflow starter in another terminal:
 
 ```bash
 uv run retrieval-test-starter
 ```
 
-The starter creates isolated task queues and local workers, runs sync and deactivation through the
-public client API, verifies the final generation and lifecycle state, prints a JSON result, and
-cleans up its controller. It uses an empty provider, so it validates orchestration rather than real
-document retrieval. It does not require `retrieval-worker` to be running.
+The starter creates temporary Task Queues and in-memory adapters, submits sync and deactivation
+through the public `RetrievalClient`, checks the final state, and cleans up. It does not need the
+deployed worker or Lakebase.
 
-Useful options:
+## Run the complete demo locally
 
-```bash
-uv run retrieval-test-starter --address localhost:7233 --namespace default
-uv run retrieval-test-starter --store-key my-local-store
-```
+The complete demo uses four roles/processes:
 
-## Run a persistent local worker
+1. a Temporal server or namespace;
+2. a Lakebase/Postgres database owned by a migration identity;
+3. a long-running worker with a worker database role;
+4. the FastAPI App with a separate App database role.
 
-For manual development, leave the Temporal server running and start both project workers with the
-explicit local-adapter flag:
+### 1. Create local configuration
 
-```bash
-RETRIEVAL_ALLOW_UNSAFE_IN_MEMORY_ADAPTERS=true uv run retrieval-worker
-```
-
-This process polls two Task Queues:
-
-- `retrieval-v2` for workflows and persistence-facing activities;
-- `retrieval-provider-v2` for provider activities.
-
-The local repository and staging store are in-memory and disappear when the worker exits. The
-local provider is empty. Never enable `RETRIEVAL_ALLOW_UNSAFE_IN_MEMORY_ADAPTERS` in production.
-Use `RetrievalClient` from application code to submit controller commands; there is no bundled CLI
-or HTTP endpoint for arbitrary sync requests.
-
-## Submit a sync from Python
-
-The application must provision the store in its `RetrievalRepository` first and know its current
-lifecycle generation. Then it can connect with the same runtime settings as the worker:
-
-```python
-from temporalio.client import Client
-
-from retrieval.config import RetrievalTemporalConfig
-from retrieval.temporal.client import RetrievalClient
-from retrieval.temporal.models.operations import SyncCommand
-from retrieval.temporal.models.sync import SyncResult
-from retrieval.temporal.runtime_config import TemporalRuntimeConfig
-
-runtime = TemporalRuntimeConfig.from_env()
-config = RetrievalTemporalConfig.from_env()
-temporal = await Client.connect(
-    runtime.address,
-    namespace=runtime.namespace,
-    api_key=runtime.api_key,
-    tls=runtime.tls,
-)
-retrieval = RetrievalClient.from_runtime(temporal, runtime=runtime, config=config)
-
-accepted = await retrieval.request_sync(
-    SyncCommand(
-        command_id="sync-command-2026-07-18T120000Z",
-        store_key="store-123",
-        expected_generation=0,
-        sync_sequence="scheduled-2026-07-18T120000Z",
-        metadata={
-            "provider": "example-provider",
-            # This identifies a quota scope; it is not the provider secret.
-            "credential_key": "provider-account-42",
-            "resource_types": "files",
-        },
-    )
-)
-result = await temporal.get_workflow_handle(
-    accepted.workflow_id,
-    result_type=SyncResult,
-).result()
-```
-
-Reuse a `command_id` only when retrying the same logical command. `sync_sequence` is the stable
-identity of the sync operation. The `credential_key` must be an opaque account or quota-scope key,
-never an access token. See [`IMPLEMENTATION_MAP.md`](IMPLEMENTATION_MAP.md#sync-command-policy) for
-all supported policy metadata and the cancellation/deactivation command types.
-
-## Test and validate
-
-Run the default suite, which includes unit tests, contract tests, and the checked-in replay smoke
-history:
+Copy the configuration checklist and protect it because it may contain credentials:
 
 ```bash
-uv run pytest
+cp .env.example .env
+chmod 600 .env
 ```
 
-Run real Temporal integration scenarios against SDK-managed ephemeral servers:
+At minimum configure the canonical Postgres values and Temporal connection:
 
-```bash
-RUN_TEMPORAL_INTEGRATION=1 uv run pytest -m integration tests/integration
+```text
+PGHOST=<database-host>
+PGPORT=5432
+PGDATABASE=<database-name>
+PGUSER=<database-role-for-this-process>
+PGSSLMODE=require
+
+LAKEBASE_ENDPOINT=projects/<project>/branches/<branch>/endpoints/<endpoint>
+
+TEMPORAL_ADDRESS=<host:port>
+TEMPORAL_NAMESPACE=<namespace>
+TEMPORAL_TLS=<true-or-false>
+TEMPORAL_API_KEY=<required-for-Temporal-Cloud>
+
+RETRIEVAL_DEMO_MODE=true
+RETRIEVAL_SEARCH_BACKEND=postgres_text
 ```
 
-Run only the complete provider-to-document topology:
+For Lakebase OAuth, set `LAKEBASE_ENDPOINT` and leave `PGPASSWORD` unset. For ordinary SSL
+Postgres, omit `LAKEBASE_ENDPOINT` and set `PGPASSWORD`. Never set both authentication methods.
+
+One `.env` is convenient for a private local rehearsal. To test least privilege, create separate
+ignored `.env.migration`, `.env.worker`, and `.env.app` files with the matching database identity.
+Select one with `RETRIEVAL_ENV_FILE=<path>`.
+
+Executable entry points inspect only `.env` in the current directory unless
+`RETRIEVAL_ENV_FILE` is set. Existing process variables win, interpolation is disabled, and an
+empty `RETRIEVAL_ENV_FILE` disables file loading.
+
+### 2. Create the schemas and grants
+
+Run these commands with the migration owner:
 
 ```bash
-RUN_TEMPORAL_INTEGRATION=1 uv run pytest -m integration \
-  tests/integration/test_full_topology.py
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-migrate
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-demo-migrate
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-grant-roles \
+  --app-role <APP_DATABASE_ROLE> \
+  --worker-role <WORKER_DATABASE_ROLE>
+
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-lakebase-migrate --check --json
+RETRIEVAL_ENV_FILE=.env.migration uv run retrieval-demo-migrate --check --json
 ```
 
-Replay checked-in and locally exported histories:
+Both checks must report `"ready": true`. The migration and grant model is explained in the
+[migration runbook](docs/runbooks/migration-and-rollback.md).
+
+### 3. Start the worker
 
 ```bash
+RETRIEVAL_ENV_FILE=.env.worker \
+RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle \
+uv run retrieval-worker
+```
+
+The worker polls `retrieval-v2` for workflows and database work, and
+`retrieval-provider-v2` for provider calls.
+
+### 4. Start the App
+
+```bash
+RETRIEVAL_ENV_FILE=.env.app uv run retrieval-demo-app
+```
+
+Verify it:
+
+```bash
+curl --fail http://127.0.0.1:8000/healthz
+curl --fail http://127.0.0.1:8000/readyz
+```
+
+Open <http://127.0.0.1:8000>. Create a run, synchronize it, inspect the cited answer, deactivate
+the store, and release the held write only after the generation fence appears.
+
+The [App guide](apps/retrieval_demo/README.md) documents every endpoint and runtime dependency.
+
+## Test the project
+
+Run the standard verification sequence:
+
+```bash
+make verify
+```
+
+It runs linting, formatting checks, compilation, the default pytest suite, the headless rehearsal,
+JavaScript syntax validation, and package builds.
+
+Specialized suites are opt-in:
+
+```bash
+make integration
 uv run pytest -m replay tests/replay
-```
-
-Run the opt-in synthetic load harness:
-
-```bash
 RUN_TEMPORAL_LOAD=1 uv run pytest -s -m load tests/load
 ```
 
-Run static validation:
+Read the [integration](tests/integration/README.md), [replay](tests/replay/README.md), and
+[load](tests/load/README.md) guides before using an external namespace.
 
-```bash
-uv run ruff check .
-uv run ruff format --check .
-uv run python -m compileall -q src tests
-```
+## Deploy the system
 
-The suite-specific guides explain external-server options and limitations:
-[`integration`](tests/integration/README.md), [`replay`](tests/replay/README.md), and
-[`load`](tests/load/README.md).
+The App and worker have different lifecycles:
 
-## Production use
+- deploy the App with `apps/retrieval_demo/databricks.yml` or the standalone App image;
+- deploy `Dockerfile.worker` on long-running compute with independent scaling and graceful
+  shutdown;
+- create the database schemas and explicit role grants before starting either runtime.
 
-The worker fails closed unless all three production adapter factories are configured:
+Use one of these runbooks:
 
-```text
-RETRIEVAL_REPOSITORY_FACTORY=package.module:create_repository
-RETRIEVAL_STAGING_STORE_FACTORY=package.module:create_staging_store
-RETRIEVAL_PROVIDER_GATEWAY_FACTORY=package.module:create_provider_gateway
-```
+- [Databricks App + external worker](docs/runbooks/deploy-lakebase-temporal-demo.md)
+- [tmprl-demo.cloud](docs/runbooks/deploy-tmprl-demo-cloud.md)
+- [Schema upgrades and rollback](docs/runbooks/migration-and-rollback.md)
 
-Production also requires namespace preparation, representative history replay, telemetry export,
-Worker Versioning, high-availability worker replicas, and production-scale validation. The exact
-requirements and known gaps are maintained in the
-[`production-readiness guide`](docs/architecture-production-readiness.md).
+Do not use an implicit Databricks profile, put credentials in command history, start child
+workflows directly, edit an applied migration, or decrement a committed store generation.
+
+## Documentation
+
+The [documentation guide](docs/README.md) provides reading paths and a glossary. The most useful
+references are:
+
+- [System specification](docs/lakebase-temporal-demo-spec.md)
+- [Workflow and data topology](docs/workflow-topology.md)
+- [Implementation map](IMPLEMENTATION_MAP.md)
+- [Production-readiness guide](docs/architecture-production-readiness.md)
+- [Metrics and observability](docs/operations/metrics.md)

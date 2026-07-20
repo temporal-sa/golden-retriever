@@ -63,6 +63,7 @@ class StoreControllerState:
     continue_as_new_requested: bool = False
     command_dedup_window_size: int = 2_000
     deactivation_drain_timeout_seconds: float = 300.0
+    object_cleanup_batch_size: int = 250
     enable_search_attributes: bool = False
     active_deactivation_fenced: bool = False
     authority_initialized: bool = False
@@ -127,6 +128,7 @@ class DeactivationInput:
     command_id: str
     operation_id: str
     drain_timeout_seconds: float | None = None
+    object_cleanup_batch_size: int = 250
     controller_workflow_id: str | None = None
     sync_workflow_ids: tuple[str, ...] = ()
     remediation_workflow_ids: tuple[str, ...] = ()
@@ -186,3 +188,7 @@ class CleanupWorkflowInput:
     lifecycle_generation: int
     user_keys: tuple[str, ...] = ()
     user_concurrency: int = 20
+    object_batch_size: int = 250
+    object_batch_index: int = 0
+    documents_deleted: int = 0
+    chunks_deleted: int = 0

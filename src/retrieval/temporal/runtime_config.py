@@ -34,9 +34,14 @@ class TemporalRuntimeConfig:
     server_priority_fairness_supported: bool = False
     enable_search_attributes: bool = False
     allow_unsafe_in_memory_adapters: bool = False
+    adapter_bundle_factory: str | None = None
     repository_factory: str | None = None
     staging_store_factory: str | None = None
     provider_gateway_factory: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.api_key and not self.tls:
+            raise ValueError("TEMPORAL_API_KEY requires TEMPORAL_TLS=true")
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> TemporalRuntimeConfig:
@@ -49,8 +54,14 @@ class TemporalRuntimeConfig:
             provider_task_queue=source.get("TEMPORAL_PROVIDER_TASK_QUEUE", "retrieval-provider-v2"),
             api_key=api_key,
             tls=_bool(source, "TEMPORAL_TLS", bool(api_key)),
-            deployment_name=source.get("TEMPORAL_DEPLOYMENT_NAME", "retrieval-v2"),
-            build_id=source.get("TEMPORAL_BUILD_ID", "local"),
+            deployment_name=(
+                source.get("TEMPORAL_DEPLOYMENT_NAME")
+                or source.get("TEMPORAL_WORKER_DEPLOYMENT_NAME")
+                or "retrieval-v2"
+            ),
+            build_id=(
+                source.get("TEMPORAL_BUILD_ID") or source.get("TEMPORAL_WORKER_BUILD_ID") or "local"
+            ),
             use_worker_versioning=_bool(source, "TEMPORAL_USE_WORKER_VERSIONING"),
             register_legacy_drain_types=_bool(source, "TEMPORAL_REGISTER_LEGACY_DRAIN_TYPES"),
             server_priority_fairness_supported=_bool(
@@ -60,6 +71,7 @@ class TemporalRuntimeConfig:
             allow_unsafe_in_memory_adapters=_bool(
                 source, "RETRIEVAL_ALLOW_UNSAFE_IN_MEMORY_ADAPTERS"
             ),
+            adapter_bundle_factory=source.get("RETRIEVAL_ADAPTER_BUNDLE_FACTORY") or None,
             repository_factory=source.get("RETRIEVAL_REPOSITORY_FACTORY") or None,
             staging_store_factory=source.get("RETRIEVAL_STAGING_STORE_FACTORY") or None,
             provider_gateway_factory=source.get("RETRIEVAL_PROVIDER_GATEWAY_FACTORY") or None,

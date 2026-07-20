@@ -12,6 +12,7 @@ from retrieval.temporal.activities.provider_api import (
     FetchResourcePageRequest,
     ListActiveUsersRequest,
     ProviderActivities,
+    ProviderRequestError,
     UserDescriptor,
 )
 from retrieval.temporal.models.quota import QuotaScope
@@ -122,4 +123,19 @@ async def test_auth_failure_is_non_retryable_application_error() -> None:
         await activities.list_active_users(_list_request("auth-request", scope))
 
     assert raised.value.type == "InvalidCredentials"
+    assert raised.value.non_retryable is True
+
+
+async def test_rejected_provider_request_is_non_retryable_application_error() -> None:
+    class RejectingGateway(FakeProviderGateway):
+        async def list_active_users(self, request: ListActiveUsersRequest):
+            raise ProviderRequestError("unsupported scope", error_type="UnsupportedScope")
+
+    activities = ProviderActivities(RejectingGateway())
+    scope = QuotaScope("fake", "opaque-credential")
+
+    with pytest.raises(ApplicationError) as raised:
+        await activities.list_active_users(_list_request("rejected-request", scope))
+
+    assert raised.value.type == "UnsupportedScope"
     assert raised.value.non_retryable is True
