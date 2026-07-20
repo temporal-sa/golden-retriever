@@ -1,1 +1,1 @@
-"""End-to-end tests that run against an ephemeral Temporal server."""
+"""Fake-provider and opt-in Temporal integration tests."""

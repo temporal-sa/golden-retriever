@@ -15,7 +15,6 @@ EXPECTED_ENVIRONMENT_VARIABLES = {
     "FILES_PAGE_WINDOW_SIZE",
     "FILES_PER_PAGE_CONCURRENCY",
     "DOCUMENT_INGESTION_CONCURRENCY",
-    "OBJECT_CLEANUP_BATCH_SIZE",
     "USER_QUOTA_MAX_IN_FLIGHT",
     "USER_QUOTA_MAX_PENDING_REQUESTS",
     "USER_QUOTA_DEDUP_WINDOW_SIZE",
@@ -50,7 +49,6 @@ def test_all_environment_values_are_typed() -> None:
             "FILES_PAGE_WINDOW_SIZE": "7",
             "FILES_PER_PAGE_CONCURRENCY": "9",
             "DOCUMENT_INGESTION_CONCURRENCY": "11",
-            "OBJECT_CLEANUP_BATCH_SIZE": "125",
             "USER_QUOTA_MAX_IN_FLIGHT": "2",
             "USER_QUOTA_MAX_PENDING_REQUESTS": "300",
             "USER_QUOTA_DEDUP_WINDOW_SIZE": "200",
@@ -69,7 +67,6 @@ def test_all_environment_values_are_typed() -> None:
     assert config.files_page_window_size == 7
     assert config.files_per_page_concurrency == 9
     assert config.document_ingestion_concurrency == 11
-    assert config.object_cleanup_batch_size == 125
     assert config.user_quota_max_in_flight == 2
     assert config.user_quota_max_pending_requests == 300
     assert config.user_quota_dedup_window_size == 200
@@ -86,17 +83,13 @@ def test_all_environment_values_are_typed() -> None:
     [
         ("STORE_SYNC_MAX_ACTIVE_USERS", "0"),
         ("FILES_PAGE_WINDOW_SIZE", "-1"),
-        ("OBJECT_CLEANUP_BATCH_SIZE", "0"),
         ("USER_QUOTA_MAX_IN_FLIGHT", "many"),
         ("USER_QUOTA_MAX_PENDING_REQUESTS", "0"),
         ("DEACTIVATION_DRAIN_TIMEOUT", "later"),
         ("DEACTIVATION_DRAIN_TIMEOUT", "0s"),
         ("TEMPORAL_ENABLE_PRIORITY_FAIRNESS", "sometimes"),
         ("TEMPORAL_PROVIDER_QUEUE_RPS", "0"),
-        ("TEMPORAL_PROVIDER_QUEUE_RPS", "nan"),
-        ("TEMPORAL_PROVIDER_QUEUE_RPS", "inf"),
         ("TEMPORAL_FAIRNESS_KEY_RPS_DEFAULT", "-2"),
-        ("TEMPORAL_FAIRNESS_KEY_RPS_DEFAULT", "-inf"),
     ],
 )
 def test_invalid_environment_values_are_rejected(name: str, value: str) -> None:

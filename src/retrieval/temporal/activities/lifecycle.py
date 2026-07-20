@@ -21,7 +21,6 @@ from retrieval.temporal.models.operations import ResultStatus
 from retrieval.temporal.models.sync import ActivateUserInput
 
 from .repositories import (
-    CleanupIncompleteError,
     LifecycleStateRejectedError,
     RetrievalRepository,
     StaleLifecycleGenerationError,
@@ -160,29 +159,19 @@ class LifecycleActivities:
             record = await self._repository.mark_inactive(
                 generation.store_key, generation.lifecycle_generation
             )
-        except (
-            CleanupIncompleteError,
-            LifecycleStateRejectedError,
-            StaleLifecycleGenerationError,
-        ) as exc:
-            is_stale = isinstance(exc, StaleLifecycleGenerationError)
-            if is_stale:
-                metrics.increment(STALE_GENERATION_REJECTIONS)
+        except StaleLifecycleGenerationError:
+            metrics.increment(STALE_GENERATION_REJECTIONS)
             metrics.increment(
                 LIFECYCLE_TRANSITIONS,
-                attributes={
-                    "transition": "inactive",
-                    "status": "stale_generation" if is_stale else "state_rejected",
-                },
+                attributes={"transition": "inactive", "status": "stale_generation"},
             )
             current = await self._repository.get_store(generation.store_key)
             return LifecycleMutationResult(
                 store_key=generation.store_key,
                 expected_generation=generation.lifecycle_generation,
                 authoritative_generation=current.lifecycle_generation,
-                status=(ResultStatus.STALE_GENERATION if is_stale else ResultStatus.REJECTED),
+                status=ResultStatus.STALE_GENERATION,
                 lifecycle_state=current.lifecycle_state,
-                message=str(exc),
             )
         metrics.increment(
             LIFECYCLE_TRANSITIONS,

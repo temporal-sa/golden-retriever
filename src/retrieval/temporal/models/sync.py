@@ -62,7 +62,6 @@ class StoreSyncInput:
     failed_user_keys: tuple[str, ...] = ()
     activation_recent_page_cap: int = 5
     enable_search_attributes: bool = False
-    refresh_search_index: bool = False
     prior_error_count: int = 0
     user_page_attempt: int = 0
     prior_users_completed: int = 0

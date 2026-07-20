@@ -1,1 +1,0 @@
-"""FastAPI demo application tests."""

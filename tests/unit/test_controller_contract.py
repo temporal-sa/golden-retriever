@@ -37,7 +37,7 @@ WORKFLOW_CONTRACTS = (
             "remediation_started",
             "request_continue_as_new",
         },
-        {"get_operation_result", "get_status"},
+        {"get_status"},
         {"cancel_sync", "request_sync", "start_deactivation"},
     ),
     (
@@ -82,7 +82,7 @@ def test_worker_registers_each_audited_workflow_once() -> None:
     audited = {contract[0] for contract in WORKFLOW_CONTRACTS}
 
     assert audited.issubset(set(V2_WORKFLOW_TYPES))
-    assert len(V2_WORKFLOW_TYPES) == 18
+    assert len(V2_WORKFLOW_TYPES) == 17
     assert len(set(V2_WORKFLOW_TYPES)) == len(V2_WORKFLOW_TYPES)
 
 

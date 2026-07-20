@@ -227,14 +227,11 @@ async def test_full_topology_ingests_a_provider_document_end_to_end() -> None:
                 accepted.workflow_id,
                 result_type=SyncResult,
             ).result()
-            stored = await repository.inspect_store(store_key)
+            stored = await repository.get_store(store_key)
 
             assert result.status is ResultStatus.SUCCEEDED
             assert result.progress.users_completed == 1
-            assert set(stored.documents) == {document.document_key}
-            stored_document = stored.documents[document.document_key]
-            assert stored_document.reference == document
-            assert [chunk.text for chunk in stored_document.chunks] == [body.decode("utf-8")]
+            assert stored.documents == {document.document_key: document}
             assert [call.operation for call in gateway.calls] == [
                 "list_active_users",
                 "fetch_resource_page",
