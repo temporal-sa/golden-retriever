@@ -81,12 +81,14 @@ class Provider:
 def test_packaged_migrations_are_contiguous_and_checksum_verified() -> None:
     migrations = discover_migrations()
 
-    assert [migration.version for migration in migrations] == [1, 2, 3, 4]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6]
     assert [migration.name for migration in migrations] == [
         "retrieval_core",
         "postgres_text_search",
         "allow_repeated_chunk_hashes",
         "harden_public_privileges",
+        "lakebase_hybrid_search",
+        "google_drive_connector_state",
     ]
     assert all(len(migration.checksum) == 64 for migration in migrations)
     assert "write_receipts" in migrations[0].sql
@@ -95,6 +97,9 @@ def test_packaged_migrations_are_contiguous_and_checksum_verified() -> None:
     assert "DROP CONSTRAINT IF EXISTS document_chunks_content_unique" in migrations[2].sql
     assert "REVOKE ALL ON SCHEMA retrieval FROM PUBLIC" in migrations[3].sql
     assert "ALTER DEFAULT PRIVILEGES IN SCHEMA retrieval" in migrations[3].sql
+    assert "lakebase_ann" in migrations[4].sql
+    assert "lakebase_bm25" in migrations[4].sql
+    assert "retrieval_connector.staged_content" in migrations[5].sql
 
 
 @pytest.mark.asyncio
@@ -105,7 +110,7 @@ async def test_apply_serializes_with_advisory_lock_and_records_checksums() -> No
     status = await runner.apply()
 
     assert status.ready
-    assert status.current_version == 4
+    assert status.current_version == 6
     assert status.pending_versions == ()
     lock_index = next(
         index
@@ -123,6 +128,8 @@ async def test_apply_serializes_with_advisory_lock_and_records_checksums() -> No
         (2, "postgres_text_search"),
         (3, "allow_repeated_chunk_hashes"),
         (4, "harden_public_privileges"),
+        (5, "lakebase_hybrid_search"),
+        (6, "google_drive_connector_state"),
     ]
 
 
@@ -133,7 +140,7 @@ async def test_check_on_missing_schema_is_read_only_and_reports_all_pending() ->
 
     assert not status.schema_present
     assert not status.ready
-    assert status.pending_versions == (1, 2, 3, 4)
+    assert status.pending_versions == (1, 2, 3, 4, 5, 6)
     assert not any(sql.startswith("CREATE SCHEMA") for sql, _, _ in connection.calls)
 
 

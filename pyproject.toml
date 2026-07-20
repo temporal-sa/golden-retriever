@@ -21,6 +21,7 @@ lakebase = [
 google-drive = [
   "google-auth[requests]>=2.40,<3",
   "httpx>=0.28,<1",
+  "pypdf>=5,<7",
 ]
 demo-app = [
   "databricks-sdk>=0.74,<1",

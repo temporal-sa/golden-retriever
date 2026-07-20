@@ -48,6 +48,16 @@ class OneDocumentDriveApi:
         return b"Launch in October.\n\nSecurity review is complete."
 
 
+class TestEmbeddings:
+    identity = "test-embedding"
+    dimension = 3
+
+    async def embed(self, texts, *, query=False):
+        assert not query
+        assert list(texts) == ["Launch in October.\n\nSecurity review is complete."]
+        return ((0.1, 0.2, 0.3),)
+
+
 async def test_drive_reference_flows_through_staging_and_generation_fenced_ingestion(
     tmp_path: Path,
 ) -> None:
@@ -73,7 +83,11 @@ async def test_drive_reference_flows_through_staging_and_generation_fenced_inges
 
     repository = InMemoryRetrievalRepository()
     await repository.ensure_store("drive-store")
-    result = await IngestionActivities(repository, staging).ingest_staged_document(
+    result = await IngestionActivities(
+        repository,
+        staging,
+        embedding_provider=TestEmbeddings(),
+    ).ingest_staged_document(
         DocumentIngestionInput(
             store_key="drive-store",
             lifecycle_generation=0,
@@ -93,3 +107,5 @@ async def test_drive_reference_flows_through_staging_and_generation_fenced_inges
     assert [chunk.text for chunk in document.chunks] == [
         "Launch in October.\n\nSecurity review is complete."
     ]
+    assert document.chunks[0].embedding == (0.1, 0.2, 0.3)
+    assert document.chunks[0].embedding_model == "test-embedding"

@@ -22,13 +22,15 @@ class GoogleDriveConfig:
     """Fail-closed configuration shared by the Drive client and provider."""
 
     credential_key: str
-    staging_directory: Path
+    staging_directory: Path | None
     user_key: str
     credentials_file: Path | None = None
     subject: str | None = None
     root_folder_id: str | None = None
     max_file_bytes: int = 10 * 1024 * 1024
     request_timeout_seconds: float = 60.0
+    staging_backend: str = "filesystem"
+    held_file_id: str | None = None
 
     @classmethod
     def from_env(
@@ -37,16 +39,26 @@ class GoogleDriveConfig:
     ) -> GoogleDriveConfig:
         values = os.environ if environ is None else environ
         credential_key = _required(values, "GOOGLE_DRIVE_CREDENTIAL_KEY")
-        staging_value = _required(values, "GOOGLE_DRIVE_STAGING_DIRECTORY")
-        staging_directory = Path(staging_value)
-        if not staging_directory.is_absolute():
+        staging_backend = (_optional(values, "RETRIEVAL_STAGING_BACKEND") or "filesystem").lower()
+        if staging_backend not in {"filesystem", "lakebase"}:
             raise GoogleDriveConfigurationError(
-                "GOOGLE_DRIVE_STAGING_DIRECTORY must be an absolute shared path"
+                "RETRIEVAL_STAGING_BACKEND must be 'filesystem' or 'lakebase'"
             )
-        if staging_directory == Path("/"):
+        staging_value = _optional(values, "GOOGLE_DRIVE_STAGING_DIRECTORY")
+        staging_directory = None if staging_value is None else Path(staging_value)
+        if staging_backend == "filesystem" and staging_directory is None:
             raise GoogleDriveConfigurationError(
-                "GOOGLE_DRIVE_STAGING_DIRECTORY must not be the filesystem root"
+                "GOOGLE_DRIVE_STAGING_DIRECTORY is required for filesystem staging"
             )
+        if staging_directory is not None:
+            if not staging_directory.is_absolute():
+                raise GoogleDriveConfigurationError(
+                    "GOOGLE_DRIVE_STAGING_DIRECTORY must be an absolute shared path"
+                )
+            if staging_directory == Path("/"):
+                raise GoogleDriveConfigurationError(
+                    "GOOGLE_DRIVE_STAGING_DIRECTORY must not be the filesystem root"
+                )
 
         credentials_value = _optional(values, "GOOGLE_DRIVE_CREDENTIALS_FILE")
         credentials_file = Path(credentials_value) if credentials_value is not None else None
@@ -59,6 +71,11 @@ class GoogleDriveConfig:
         if root_folder_id is not None and _FOLDER_ID.fullmatch(root_folder_id) is None:
             raise GoogleDriveConfigurationError(
                 "GOOGLE_DRIVE_ROOT_FOLDER_ID contains unsupported characters"
+            )
+        held_file_id = _optional(values, "GOOGLE_DRIVE_HELD_FILE_ID")
+        if held_file_id is not None and _FOLDER_ID.fullmatch(held_file_id) is None:
+            raise GoogleDriveConfigurationError(
+                "GOOGLE_DRIVE_HELD_FILE_ID contains unsupported characters"
             )
 
         max_file_bytes = _positive_int(
@@ -80,6 +97,8 @@ class GoogleDriveConfig:
             root_folder_id=root_folder_id,
             max_file_bytes=max_file_bytes,
             request_timeout_seconds=request_timeout_seconds,
+            staging_backend=staging_backend,
+            held_file_id=held_file_id,
         )
 
     def sync_metadata(self, *, page_size: int = 100) -> dict[str, str]:
@@ -93,6 +112,7 @@ class GoogleDriveConfig:
             "quota_class": "drive-api-v3",
             "resource_types": "files",
             "provider_page_size": str(page_size),
+            "refresh_search_index": "true",
         }
 
 

@@ -20,6 +20,7 @@ from temporalio.common import (
 from temporalio.worker import Worker, WorkerDeploymentConfig
 
 from retrieval.config import RetrievalTemporalConfig
+from retrieval.embeddings import EmbeddingProvider
 from retrieval.environment import inject_environment
 from retrieval.temporal.activities.cleanup import CleanupActivities
 from retrieval.temporal.activities.hooks import (
@@ -42,6 +43,7 @@ from retrieval.temporal.activities.repositories import (
     RetrievalRepository,
     StagingStore,
 )
+from retrieval.temporal.activities.search_index import SearchIndexActivities, SearchIndexRefresher
 from retrieval.temporal.common.priorities import priority_capability
 from retrieval.temporal.runtime_config import TemporalRuntimeConfig
 from retrieval.temporal.workflows.activate_user import ActivateUserWorkflow
@@ -60,6 +62,7 @@ from retrieval.temporal.workflows.failed_user_remediation import (
 )
 from retrieval.temporal.workflows.files_page import FilesPageWorkflow
 from retrieval.temporal.workflows.legacy import LEGACY_DRAIN_WORKFLOWS
+from retrieval.temporal.workflows.provider_preflight import ProviderPreflightWorkflow
 from retrieval.temporal.workflows.resource_pages import ResourcePagesWorkflow
 from retrieval.temporal.workflows.resource_sync import ResourceSyncWorkflow
 from retrieval.temporal.workflows.root_sync import RootSyncWorkflow
@@ -69,7 +72,7 @@ from retrieval.temporal.workflows.user_sync import UserSyncWorkflow
 
 logger = logging.getLogger(__name__)
 
-WORKER_GRACEFUL_SHUTDOWN_TIMEOUT = timedelta(seconds=45)
+WORKER_GRACEFUL_SHUTDOWN_TIMEOUT = timedelta(seconds=60)
 
 
 class _WorkerHandle(Protocol):
@@ -87,6 +90,8 @@ class AdapterBundle:
     provider_gateway: ProviderGateway
     before_document_commit: BeforeDocumentCommitHook | None = None
     ingestion_event_sink: IngestionEventSink | None = None
+    embedding_provider: EmbeddingProvider | None = None
+    search_index_refresher: SearchIndexRefresher | None = None
 
     def __iter__(self):
         """Retain tuple-unpacking compatibility for existing adapter factories/tests."""
@@ -101,6 +106,8 @@ class AdapterBundle:
         await _close_unique_resources(
             (
                 self.ingestion_event_sink,
+                self.search_index_refresher,
+                self.embedding_provider,
                 self.before_document_commit,
                 self.provider_gateway,
                 self.staging_store,
@@ -151,6 +158,7 @@ V2_WORKFLOW_TYPES = (
     DeactivateOneUserWorkflow,
     DeactivateAllUsersWorkflow,
     RemoveObjectsWorkflow,
+    ProviderPreflightWorkflow,
 )
 
 
@@ -179,6 +187,8 @@ def build_workers(
     provider_gateway: ProviderGateway,
     before_document_commit: BeforeDocumentCommitHook | None = None,
     ingestion_event_sink: IngestionEventSink | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
+    search_index_refresher: SearchIndexRefresher | None = None,
 ) -> tuple[Worker, Worker]:
     lifecycle = LifecycleActivities(repository)
     ingestion = IngestionActivities(
@@ -186,6 +196,7 @@ def build_workers(
         staging_store,
         before_commit=before_document_commit or NoopBeforeDocumentCommitHook(),
         event_sink=ingestion_event_sink or NoopIngestionEventSink(),
+        embedding_provider=embedding_provider,
     )
     cleanup = CleanupActivities(repository)
     quota_client = QuotaClientActivities(
@@ -197,6 +208,9 @@ def build_workers(
         continue_as_new_message_count=(config.user_quota_continue_as_new_message_count),
     )
     provider = ProviderActivities(provider_gateway)
+    search_index = (
+        None if search_index_refresher is None else SearchIndexActivities(search_index_refresher)
+    )
     workflows = list(V2_WORKFLOW_TYPES)
     if runtime.register_legacy_drain_types:
         workflows.extend(LEGACY_DRAIN_WORKFLOWS)
@@ -218,14 +232,19 @@ def build_workers(
             cleanup.remove_objects,
             cleanup.remove_object_batch,
             quota_client.signal_with_start_user_quota,
-        ],
+        ]
+        + ([] if search_index is None else [search_index.refresh_search_index]),
         graceful_shutdown_timeout=WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
         deployment_config=deployment,
     )
     provider_worker = Worker(
         client,
         task_queue=runtime.provider_task_queue,
-        activities=[provider.list_active_users, provider.fetch_resource_page],
+        activities=[
+            provider.list_active_users,
+            provider.fetch_resource_page,
+            provider.preflight,
+        ],
         max_task_queue_activities_per_second=config.temporal_provider_queue_rps,
         graceful_shutdown_timeout=WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
         deployment_config=deployment,
@@ -417,6 +436,8 @@ async def run_worker() -> None:
                 provider_gateway=adapters.provider_gateway,
                 before_document_commit=adapters.before_document_commit,
                 ingestion_event_sink=adapters.ingestion_event_sink,
+                embedding_provider=getattr(adapters, "embedding_provider", None),
+                search_index_refresher=getattr(adapters, "search_index_refresher", None),
             )
             await _run_workers_until_stopped(workers, shutdown_requested)
         finally:

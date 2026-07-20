@@ -10,13 +10,16 @@ import os
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from retrieval.temporal.activities.provider_api import (
     ActiveUsersPage,
     FetchResourcePageRequest,
     InvalidCredentialsError,
     ListActiveUsersRequest,
+    ProviderPreflightFile,
+    ProviderPreflightRequest,
+    ProviderPreflightResult,
     ProviderQuotaExhausted,
     ProviderRequestError,
     ResourcePageManifest,
@@ -35,7 +38,8 @@ from .models import (
     DriveQuotaExhausted,
     DriveRequestError,
 )
-from .staging import GoogleDriveStagingStore
+from .pdf import PdfTextExtractionError, extract_pdf_text
+from .staging import GoogleDriveStagingStore, StagedGoogleDriveObject
 
 GOOGLE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 GOOGLE_SHORTCUT_MIME_TYPE = "application/vnd.google-apps.shortcut"
@@ -61,6 +65,7 @@ _DIRECT_APPLICATION_MIME_TYPES = {
     "application/xml",
     "application/yaml",
 }
+_PDF_MIME_TYPE = "application/pdf"
 
 
 class _EmptyDocumentError(ValueError):
@@ -91,6 +96,50 @@ class _CachedPage:
             deleted_document_keys=self.deleted_document_keys,
             next_cursor=self.next_cursor,
         )
+
+
+class GoogleDriveStaging(Protocol):
+    async def prepare(self) -> None: ...
+
+    async def stage(self, body: bytes) -> StagedGoogleDriveObject: ...
+
+    async def get(self, staging_uri: str) -> bytes: ...
+
+
+class GoogleDriveProviderState(Protocol):
+    async def cached_page(self, request: FetchResourcePageRequest) -> _CachedPage | None: ...
+
+    async def traversal_state(self, request: FetchResourcePageRequest) -> _TraversalState: ...
+
+    async def save_cursor(
+        self, request: FetchResourcePageRequest, state: _TraversalState
+    ) -> str: ...
+
+    async def save_page(self, request: FetchResourcePageRequest, page: _CachedPage) -> None: ...
+
+    async def reconciled_deletions(
+        self,
+        request: FetchResourcePageRequest,
+        current_documents: tuple[DocumentRef, ...],
+    ) -> tuple[str, ...]: ...
+
+    async def save_tombstones(
+        self, request: FetchResourcePageRequest, document_keys: tuple[str, ...]
+    ) -> None: ...
+
+    async def tombstone_page(
+        self,
+        request: FetchResourcePageRequest,
+        *,
+        offset: int,
+        page_size: int,
+    ) -> tuple[tuple[str, ...], int]: ...
+
+    async def promote_baseline(
+        self,
+        request: FetchResourcePageRequest,
+        deleted_document_keys: tuple[str, ...],
+    ) -> None: ...
 
 
 class _GoogleDriveProviderState:
@@ -392,21 +441,134 @@ class GoogleDriveProviderGateway:
         self,
         config: GoogleDriveConfig,
         api: DriveApiClientProtocol,
-        staging_store: GoogleDriveStagingStore,
+        staging_store: GoogleDriveStaging,
+        state_store: GoogleDriveProviderState | None = None,
     ) -> None:
         self._config = config
         self._api = api
         self._staging = staging_store
-        self._state = _GoogleDriveProviderState(
-            staging_store.state_root,
-            root_folder_id=config.root_folder_id,
-        )
+        if state_store is not None:
+            self._state = state_store
+        elif isinstance(staging_store, GoogleDriveStagingStore):
+            self._state = _GoogleDriveProviderState(
+                staging_store.state_root,
+                root_folder_id=config.root_folder_id,
+            )
+        else:
+            raise ValueError("a durable Google Drive provider state store is required")
 
     async def list_active_users(self, request: ListActiveUsersRequest) -> ActiveUsersPage:
         users = ()
         if request.cursor is None:
             users = (UserDescriptor(user_key=self._config.user_key),)
         return ActiveUsersPage(request_id=request.request_id, users=users)
+
+    async def preflight(self, request: ProviderPreflightRequest) -> ProviderPreflightResult:
+        if request.max_files < 1 or request.max_files > 500:
+            raise ProviderRequestError(
+                "Google Drive preflight max_files must be between 1 and 500",
+                error_type="InvalidPreflightRequest",
+            )
+        if request.max_folders < 1 or request.max_folders > 500:
+            raise ProviderRequestError(
+                "Google Drive preflight max_folders must be between 1 and 500",
+                error_type="InvalidPreflightRequest",
+            )
+        pending = [self._config.root_folder_id]
+        files: list[DriveFile] = []
+        folders_scanned = 0
+        truncated = False
+        try:
+            while pending and folders_scanned < request.max_folders:
+                folder_id = pending.pop(0)
+                folders_scanned += 1
+                page_token: str | None = None
+                while True:
+                    _preflight_heartbeat(f"listing-folder-{folders_scanned}")
+                    page = await self._api.list_files(
+                        page_token=page_token,
+                        page_size=max(1, min(request.page_size, 1_000)),
+                        parent_id=folder_id,
+                    )
+                    if page.incomplete_search:
+                        raise ProviderRequestError(
+                            "Google Drive reported an incomplete preflight result",
+                            error_type="IncompleteProviderSearch",
+                        )
+                    for item in page.files:
+                        if item.trashed:
+                            continue
+                        if item.mime_type == GOOGLE_FOLDER_MIME_TYPE:
+                            if item.file_id not in pending:
+                                pending.append(item.file_id)
+                        elif item.mime_type != GOOGLE_SHORTCUT_MIME_TYPE:
+                            files.append(item)
+                            if len(files) >= request.max_files:
+                                truncated = True
+                                break
+                    if truncated or page.next_page_token is None:
+                        break
+                    page_token = page.next_page_token
+                if truncated:
+                    break
+            if pending:
+                truncated = True
+        except DriveAuthenticationError as exc:
+            raise InvalidCredentialsError("Google Drive rejected configured credentials") from exc
+        except DriveQuotaExhausted as exc:
+            raise ProviderQuotaExhausted(
+                remaining=0,
+                retry_after_seconds=exc.retry_after_seconds,
+            ) from exc
+        except DriveNotFoundError as exc:
+            raise ProviderRequestError(
+                "Google Drive root folder is unavailable",
+                error_type="GoogleDriveScopeUnavailable",
+            ) from exc
+        except DriveRequestError as exc:
+            if exc.status_code >= 500:
+                raise
+            raise ProviderRequestError(
+                str(exc),
+                error_type="GoogleDriveRequestRejected",
+            ) from exc
+
+        ordered = sorted(files, key=lambda item: (item.name.casefold(), item.file_id))
+        searchable_ids = [
+            item.file_id
+            for item in ordered
+            if _is_searchable_metadata(item, self._config.max_file_bytes)
+        ]
+        held_file_id = self._config.held_file_id
+        if held_file_id is None and searchable_ids:
+            held_file_id = searchable_ids[0]
+        if (
+            self._config.held_file_id is not None
+            and self._config.held_file_id not in searchable_ids
+        ):
+            raise ProviderRequestError(
+                "configured held file is missing from the root folder or is not searchable",
+                error_type="GoogleDriveHeldFileUnavailable",
+            )
+        return ProviderPreflightResult(
+            request_id=request.request_id,
+            provider="google-drive",
+            root_folder_id=self._config.root_folder_id,
+            files=tuple(
+                ProviderPreflightFile(
+                    document_key=_document_key(item.file_id),
+                    name=item.name,
+                    mime_type=item.mime_type,
+                    modified_time=item.modified_time,
+                    source_uri=item.web_view_link,
+                    searchable=_is_searchable_metadata(item, self._config.max_file_bytes),
+                    held_for_demo=item.file_id == held_file_id,
+                )
+                for item in ordered
+            ),
+            folders_scanned=folders_scanned,
+            truncated=truncated,
+        )
 
     async def fetch_resource_page(
         self,
@@ -555,13 +717,23 @@ class GoogleDriveProviderGateway:
                     export_mime_type=export_mime_type,
                     max_bytes=self._config.max_file_bytes,
                 )
-                staged_body = _searchable_body(file, raw_body)
+                staged_body = await _searchable_body(
+                    file,
+                    raw_body,
+                    max_text_bytes=self._config.max_file_bytes,
+                )
             except (
                 DriveFileTooLargeError,
                 DriveNotFoundError,
+                PdfTextExtractionError,
                 UnicodeDecodeError,
                 _EmptyDocumentError,
-            ):
+            ) as exc:
+                if file.file_id == self._config.held_file_id:
+                    raise ProviderRequestError(
+                        "configured held file could not be converted to searchable text",
+                        error_type="GoogleDriveHeldFileUnreadable",
+                    ) from exc
                 continue
             staged = await self._staging.stage(staged_body)
             documents.append(
@@ -594,13 +766,46 @@ _UNSUPPORTED = object()
 def _export_mime_type(mime_type: str) -> str | None | object:
     if mime_type in _EXPORT_MIME_TYPES:
         return _EXPORT_MIME_TYPES[mime_type]
-    if mime_type.startswith("text/") or mime_type in _DIRECT_APPLICATION_MIME_TYPES:
+    if (
+        mime_type == _PDF_MIME_TYPE
+        or mime_type.startswith("text/")
+        or mime_type in _DIRECT_APPLICATION_MIME_TYPES
+    ):
         return None
     return _UNSUPPORTED
 
 
-def _searchable_body(file: DriveFile, raw_body: bytes) -> bytes:
-    text = raw_body.decode("utf-8")
+def _is_searchable_metadata(file: DriveFile, max_file_bytes: int) -> bool:
+    return (
+        not file.trashed
+        and _export_mime_type(file.mime_type) is not _UNSUPPORTED
+        and (file.size is None or file.size <= max_file_bytes)
+    )
+
+
+def _preflight_heartbeat(stage: str) -> None:
+    try:
+        from temporalio import activity
+
+        activity.heartbeat(stage)
+    except RuntimeError:
+        pass
+
+
+async def _searchable_body(
+    file: DriveFile,
+    raw_body: bytes,
+    *,
+    max_text_bytes: int,
+) -> bytes:
+    if file.mime_type == _PDF_MIME_TYPE:
+        text = await asyncio.to_thread(
+            extract_pdf_text,
+            raw_body,
+            max_text_bytes=max_text_bytes,
+        )
+    else:
+        text = raw_body.decode("utf-8")
     if not text.strip():
         raise _EmptyDocumentError("Google Drive document is empty")
     title = " ".join(file.name.splitlines()).strip() or file.file_id

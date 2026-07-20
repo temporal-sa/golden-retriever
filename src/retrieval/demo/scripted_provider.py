@@ -9,6 +9,9 @@ from retrieval.temporal.activities.provider_api import (
     ActiveUsersPage,
     FetchResourcePageRequest,
     ListActiveUsersRequest,
+    ProviderPreflightFile,
+    ProviderPreflightRequest,
+    ProviderPreflightResult,
     ProviderQuotaExhausted,
     ResourcePageManifest,
     UserDescriptor,
@@ -57,6 +60,27 @@ class ScriptedNorthstarProvider:
             request_id=request.request_id,
             page_key="northstar-files-v1",
             documents=self._scenario.references if valid else (),
+        )
+
+    async def preflight(self, request: ProviderPreflightRequest) -> ProviderPreflightResult:
+        return ProviderPreflightResult(
+            request_id=request.request_id,
+            provider="scripted",
+            root_folder_id=None,
+            files=tuple(
+                ProviderPreflightFile(
+                    document_key=document.document_key,
+                    name=document.document_key,
+                    mime_type="text/markdown",
+                    modified_time="2026-01-01T00:00:00Z",
+                    source_uri=None,
+                    searchable=True,
+                    held_for_demo=document.document_key == self._scenario.held_document_key,
+                )
+                for document in self._scenario.documents[: request.max_files]
+            ),
+            folders_scanned=0,
+            truncated=len(self._scenario.documents) > request.max_files,
         )
 
     async def _before_operation(self, store_key: str, *, request_id: str, operation: str) -> None:
@@ -118,8 +142,10 @@ async def create_adapter_bundle():
 
     config = DemoConfig.from_env()
     config.require_enabled()
+    from retrieval.embeddings import create_embedding_provider
     from retrieval.lakebase.config import LakebaseConfig
     from retrieval.lakebase.connection import LakebaseConnectionProvider
+    from retrieval.lakebase.indexing import LakebaseHybridIndexRefresher
     from retrieval.lakebase.repository import LakebaseRetrievalRepository
     from retrieval.temporal.worker import AdapterBundle
 
@@ -145,6 +171,8 @@ async def create_adapter_bundle():
             ),
             before_document_commit=DemoBeforeDocumentCommitHook(state_store, config=config),
             ingestion_event_sink=DemoIngestionEventSink(state_store),
+            embedding_provider=create_embedding_provider(),
+            search_index_refresher=LakebaseHybridIndexRefresher(provider),
         )
     except BaseException:
         await provider.aclose()

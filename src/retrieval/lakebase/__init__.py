@@ -3,12 +3,19 @@
 from .config import LakebaseConfig, LakebaseConfigurationError
 from .connection import LakebaseConnectionProvider
 from .repository import LakebaseRetrievalRepository, create_repository
-from .search import PostgresTextSearch, RetrievalSearch, SearchHit, create_search
+from .search import (
+    LakebaseHybridSearch,
+    PostgresTextSearch,
+    RetrievalSearch,
+    SearchHit,
+    create_search,
+)
 
 __all__ = [
     "LakebaseConfig",
     "LakebaseConfigurationError",
     "LakebaseConnectionProvider",
+    "LakebaseHybridSearch",
     "LakebaseRetrievalRepository",
     "PostgresTextSearch",
     "RetrievalSearch",

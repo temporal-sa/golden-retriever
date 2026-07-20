@@ -31,6 +31,7 @@ def test_config_requires_opaque_credential_and_absolute_staging_path(tmp_path: P
         "quota_class": "drive-api-v3",
         "resource_types": "files",
         "provider_page_size": "250",
+        "refresh_search_index": "true",
     }
 
 

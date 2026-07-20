@@ -19,6 +19,7 @@ from retrieval.temporal.workflows.failed_user_remediation import (
     FailedUserRemediationWorkflow,
 )
 from retrieval.temporal.workflows.files_page import FilesPageWorkflow
+from retrieval.temporal.workflows.provider_preflight import ProviderPreflightWorkflow
 from retrieval.temporal.workflows.resource_pages import ResourcePagesWorkflow
 from retrieval.temporal.workflows.resource_sync import ResourceSyncWorkflow
 from retrieval.temporal.workflows.root_sync import RootSyncWorkflow
@@ -38,6 +39,7 @@ REPLAY_WORKFLOWS: tuple[type, ...] = (
     FailedUserRemediationWorkflow,
     FilesPageWorkflow,
     RemoveObjectsWorkflow,
+    ProviderPreflightWorkflow,
     ResourcePagesWorkflow,
     ResourceSyncWorkflow,
     RootSyncWorkflow,

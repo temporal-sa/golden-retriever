@@ -96,6 +96,47 @@ class CapturingGateway:
             result_status=self.terminal_result,
         )
 
+    async def start_preflight(self, request) -> str:
+        self.preflight_request = request
+        return f"retrieval-preflight-{request.request_id}"
+
+    async def get_preflight(self, workflow_id: str):
+        return {
+            "workflow_id": workflow_id,
+            "status": "completed",
+            "result": {
+                "request_id": self.preflight_request.request_id,
+                "provider": "google-drive",
+                "files": [{"name": "Roadmap", "searchable": True}],
+            },
+        }
+
+
+async def test_preflight_is_stably_identified_and_persisted_in_demo_state() -> None:
+    scenario = load_northstar_scenario()
+    repository = InMemoryRetrievalRepository()
+    state = InMemoryDemoStateStore()
+    gateway = CapturingGateway()
+    service = DemoService(
+        config=DemoConfig(enabled=True),
+        scenario=scenario,
+        state_store=state,
+        repository=repository,
+        search_adapter=InMemoryTextSearch(repository),
+        command_gateway=gateway,
+    )
+    await service.start()
+    try:
+        started = await service.start_preflight(idempotency_key="stable-preflight")
+        completed = await service.get_preflight(str(started["workflow_id"]))
+
+        assert started["status"] == "running"
+        assert completed["status"] == "completed"
+        assert completed["result"]["files"][0]["name"] == "Roadmap"
+        assert await state.get_preflight(str(started["workflow_id"])) == completed
+    finally:
+        await service.aclose()
+
 
 class ReceiptFailureStore(InMemoryDemoStateStore):
     def __init__(self) -> None:
@@ -283,6 +324,7 @@ async def test_sync_configures_quota_scope_and_snapshot_exposes_workflow_ids() -
         duplicate = await service.start_sync(run.run_id, idempotency_key="service-sync")
         duplicate_run = await service.create_run(idempotency_key="service-run")
         snapshot = await service.get_snapshot(run.run_id)
+        proof = await service.get_proof(run.run_id)
 
         assert first == duplicate
         assert duplicate.status.value == "accepted"
@@ -296,6 +338,10 @@ async def test_sync_configures_quota_scope_and_snapshot_exposes_workflow_ids() -
         assert metadata["resource_types"] == "files"
         assert metadata["credential_key"] == f"northstar-demo-run:{run.run_id}"
         assert snapshot.controller is not None
+        assert snapshot.story_state == "ready"
+        assert proof["proof_query"] == (
+            f"SELECT * FROM retrieval_demo_ui.generation_proof('{run.store_key}');"
+        )
         assert snapshot.controller["controller_workflow_id"] == store_controller_workflow_id(
             run.store_key
         )

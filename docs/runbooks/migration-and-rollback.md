@@ -1,6 +1,6 @@
 # Database migration, upgrade, and rollback runbook
 
-This runbook explains how to create, verify, upgrade, and recover the two Postgres schemas used by
+This runbook explains how to create, verify, upgrade, and recover the Postgres schemas used by
 the system. It assumes the reader knows only that Lakebase is Postgres. Read the
 [system specification](../lakebase-temporal-demo-spec.md#database-schemas) for the data model.
 
@@ -18,12 +18,12 @@ the system. It assumes the reader knows only that Lakebase is Postgres. Read the
 
 | Identity | Purpose |
 |---|---|
-| Migration owner | Own schemas, tables, indexes, ledgers, and seed function; apply grants |
+| Migration owner | Own schemas, tables, hybrid indexes, ledgers, and constrained functions; apply grants |
 | App role | Read core state/search; write demo state through constrained privileges |
 | Worker role | Perform generation-fenced retrieval DML and limited demo control/event DML |
 
-Keep all three distinct. The App creates a Northstar run through
-`retrieval_demo_ui.create_northstar_run(...)`, not direct core table DML.
+Keep all three distinct. The App creates a demo run through
+`retrieval_demo_ui.create_demo_run(...)`, not direct core table DML.
 
 ## Configure a migration connection
 
@@ -72,8 +72,10 @@ uv run retrieval-lakebase-migrate
 uv run retrieval-demo-migrate
 ```
 
-Core migrations create `retrieval`; demo migrations create `retrieval_demo_ui` and its constrained
-seed function.
+Core migrations create `retrieval`, durable `retrieval_connector` state, and Lakebase Search BM25/
+ANN indexes. Demo migrations create `retrieval_demo_ui` plus constrained run/proof functions.
+Lakebase Search Beta must be enabled before applying core migration 5; the migration fails closed
+when its index access methods are unavailable.
 
 ### 3. Apply runtime grants
 
@@ -94,13 +96,15 @@ The App receives:
 - core lifecycle/document/chunk/migration-ledger `SELECT`;
 - demo table `SELECT` plus the required `INSERT`/`UPDATE` operations;
 - demo sequence use;
-- `EXECUTE` on the fixed Northstar seed function;
+- `EXECUTE` on constrained `create_demo_run` and `generation_proof` functions;
+- write access to durable preflight/idempotency/operation presentation state;
 - no direct core table DML from this grant set.
 
 The worker receives:
 
 - `USAGE` on both schemas and core ledger `SELECT`;
 - required core reads, inserts, updates, and deletes;
+- connector staging/checkpoint DML and `MAINTAIN` on chunks for synchronized index refresh;
 - demo run/control reads, control updates, event reads/writes, and sequence use;
 - no schema ownership or general DDL from this grant set.
 
@@ -121,7 +125,7 @@ Both results must contain `"ready": true`, no pending versions, and no checksum 
 Reconnect separately as App and worker. Use transactions that are rolled back or a disposable
 store. Confirm:
 
-- App can read core state/search, write allowed demo objects, and call the seed function;
+- App can read core state/search, write allowed demo objects, and call constrained functions;
 - App cannot insert/update/delete core retrieval tables;
 - worker can run repository mutations/cleanup and demo control/event operations;
 - worker cannot create/alter schemas or objects;
@@ -142,7 +146,7 @@ normal readiness/search succeeds. Recheck after every resource-binding update.
 `/readyz` verifies connectivity and migration ledgers; it does not perform negative privilege
 tests.
 
-## Run a local full-stack database rehearsal
+## Run a Lakebase-connected full-stack rehearsal
 
 Start Temporal:
 
@@ -157,7 +161,9 @@ export TEMPORAL_ADDRESS=localhost:7233
 export TEMPORAL_NAMESPACE=default
 export TEMPORAL_TLS=false
 export RETRIEVAL_DEMO_MODE=true
-export RETRIEVAL_SEARCH_BACKEND=postgres_text
+export RETRIEVAL_SEARCH_BACKEND=lakebase_hybrid
+export RETRIEVAL_EMBEDDING_DIMENSION=1024
+export DATABRICKS_EMBEDDING_ENDPOINT=<1024-dimensional-endpoint>
 export RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle
 uv run retrieval-worker
 ```
@@ -166,7 +172,9 @@ Start the App with the App database identity:
 
 ```bash
 export RETRIEVAL_DEMO_MODE=true
-export RETRIEVAL_SEARCH_BACKEND=postgres_text
+export RETRIEVAL_SEARCH_BACKEND=lakebase_hybrid
+export RETRIEVAL_EMBEDDING_DIMENSION=1024
+export DATABRICKS_EMBEDDING_ENDPOINT=<1024-dimensional-endpoint>
 uv run retrieval-demo-app
 ```
 
@@ -177,7 +185,9 @@ curl --fail http://127.0.0.1:8000/healthz
 curl --fail http://127.0.0.1:8000/readyz
 ```
 
-Create a fresh Northstar run for every rehearsal. Never reset an old run's generation.
+Create a fresh run for every rehearsal. Never reset an old run's generation. The scripted provider
+is only a local source substitute; production uses the Google Drive bundle and Lakebase connector
+state.
 
 ## Add a schema change
 
@@ -225,7 +235,7 @@ Archive:
 6. Rerun grants and all effective privilege checks.
 7. Start at least two new worker replicas and verify both queues.
 8. Route a deterministic canary through the reviewed Worker Versioning procedure.
-9. Deploy/start the compatible App and run a fresh Northstar rehearsal.
+9. Deploy/start the compatible App and run a fresh Google Drive rehearsal.
 10. Expand only while named SLO/stop thresholds pass.
 11. Keep the previous compatible workers until their executions drain.
 

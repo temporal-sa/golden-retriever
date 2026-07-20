@@ -82,7 +82,7 @@ def test_worker_registers_each_audited_workflow_once() -> None:
     audited = {contract[0] for contract in WORKFLOW_CONTRACTS}
 
     assert audited.issubset(set(V2_WORKFLOW_TYPES))
-    assert len(V2_WORKFLOW_TYPES) == 17
+    assert len(V2_WORKFLOW_TYPES) == 18
     assert len(set(V2_WORKFLOW_TYPES)) == len(V2_WORKFLOW_TYPES)
 
 

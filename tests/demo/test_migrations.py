@@ -68,7 +68,7 @@ class _Provider:
 def test_demo_migration_is_packaged_and_contains_durable_contracts() -> None:
     migrations = discover_demo_migrations()
 
-    assert tuple(item.version for item in migrations) == (1,)
+    assert tuple(item.version for item in migrations) == (1, 2)
     sql = migrations[0].sql
     for table in (
         "demo_runs",
@@ -81,6 +81,11 @@ def test_demo_migration_is_packaged_and_contains_durable_contracts() -> None:
     assert "SECURITY DEFINER" in sql
     assert "REVOKE ALL" in sql
     assert "UNIQUE (run_id, event_key)" in sql
+    google_drive_sql = migrations[1].sql
+    assert "create_demo_run" in google_drive_sql
+    assert "generation_proof" in google_drive_sql
+    assert "gdrive:" in google_drive_sql
+    assert "retrieval_demo_ui.preflight_runs" in google_drive_sql
 
 
 @pytest.mark.asyncio

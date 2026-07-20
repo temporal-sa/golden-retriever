@@ -1,8 +1,10 @@
 # Deploy the demo with Databricks App, Lakebase, and an external Temporal worker
 
-This runbook creates a working cloud environment for the Northstar demonstration. It assumes no
-repository history. Read the root [README](../../README.md) for the system overview and the
-[specification](../lakebase-temporal-demo-spec.md) for expected behavior.
+This runbook creates the real Google Drive demonstration: a Databricks App, Lakebase Postgres with
+Lakebase Search, a Databricks embedding endpoint, and an external Temporal worker. Read the root
+[README](../../README.md), the
+[implementation specification](../google-drive-demo-implementation-spec.md), and the
+[10-minute presenter runbook](google-drive-demo.md) first.
 
 ## What this deployment contains
 
@@ -41,6 +43,10 @@ Use a secure operator worksheet. These names appear in commands below:
 | `LB_ENDPOINT_HOST` | Endpoint DNS host from endpoint status |
 | `LB_DATABASE` | Postgres database name, usually `databricks_postgres` |
 | `MIGRATION_DB_USER` | Postgres role of the database owner/project creator |
+| `EMBEDDING_ENDPOINT` | Model Serving endpoint returning 1024-dimensional embeddings |
+| `DRIVE_ROOT_FOLDER_ID` | Stable Google Drive folder ID |
+| `DRIVE_HELD_FILE_ID` | Stable searchable file ID held for the late-write race |
+| `DRIVE_FOLDER_URL` | Credential-free browser URL for the stable folder |
 | `TEMPORAL_SECRET_SCOPE` | Databricks scope holding three Temporal values |
 | `APP_DB_ROLE` | App `service_principal_client_id` after bundle deploy |
 | `WORKER_CLIENT_ID` | Worker service-principal client/application ID |
@@ -163,8 +169,16 @@ export LB_ENDPOINT_HOST=<STATUS_HOSTS_HOST>
 ```
 
 Confirm the endpoint is read/write and ready. Review min/max capacity, suspend timeout, and branch
-retention/TTL. Use `postgres_text`; migration 2 creates its GIN index. Do not introduce a different
-search backend during a presentation.
+retention/TTL.
+
+Enable Lakebase Search Beta for the project **before** applying migrations. Migration 5 creates the
+`lakebase_text` BM25 and `lakebase_vector` ANN indexes and intentionally fails when Search is not
+available. Production uses `RETRIEVAL_SEARCH_BACKEND=lakebase_hybrid`; there is no presentation
+fallback.
+
+Create or select `EMBEDDING_ENDPOINT` and verify it returns vectors with exactly 1024 finite values.
+The bundle gives the App resource `CAN_QUERY`; separately grant the worker service principal
+`CAN_QUERY` because embeddings are generated inside worker Activities.
 
 ## 3. Create the Temporal secret scope
 
@@ -215,6 +229,9 @@ databricks bundle validate --strict \
   -t "$BUNDLE_TARGET" \
   --var "lakebase_branch=$LB_BRANCH_NAME" \
   --var "lakebase_database=$LB_DATABASE_NAME" \
+  --var "embedding_endpoint=$EMBEDDING_ENDPOINT" \
+  --var "demo_held_document_key=gdrive:$DRIVE_HELD_FILE_ID" \
+  --var "google_drive_folder_url=$DRIVE_FOLDER_URL" \
   --var "temporal_secret_scope=$TEMPORAL_SECRET_SCOPE"
 
 databricks bundle deploy \
@@ -222,6 +239,9 @@ databricks bundle deploy \
   -t "$BUNDLE_TARGET" \
   --var "lakebase_branch=$LB_BRANCH_NAME" \
   --var "lakebase_database=$LB_DATABASE_NAME" \
+  --var "embedding_endpoint=$EMBEDDING_ENDPOINT" \
+  --var "demo_held_document_key=gdrive:$DRIVE_HELD_FILE_ID" \
+  --var "google_drive_folder_url=$DRIVE_FOLDER_URL" \
   --var "temporal_secret_scope=$TEMPORAL_SECRET_SCOPE"
 ```
 
@@ -236,6 +256,9 @@ databricks bundle summary \
   -t "$BUNDLE_TARGET" \
   --var "lakebase_branch=$LB_BRANCH_NAME" \
   --var "lakebase_database=$LB_DATABASE_NAME" \
+  --var "embedding_endpoint=$EMBEDDING_ENDPOINT" \
+  --var "demo_held_document_key=gdrive:$DRIVE_HELD_FILE_ID" \
+  --var "google_drive_folder_url=$DRIVE_FOLDER_URL" \
   --var "temporal_secret_scope=$TEMPORAL_SECRET_SCOPE"
 
 export DEPLOYED_APP_NAME=<APP_NAME_FROM_SUMMARY>
@@ -250,8 +273,9 @@ Set `APP_DB_ROLE` to `service_principal_client_id` from the App JSON:
 export APP_DB_ROLE=<SERVICE_PRINCIPAL_CLIENT_ID>
 ```
 
-Confirm the App has exactly one Postgres resource and the three Temporal secret resources. The
-Postgres binding creates a Lakebase role whose `postgres_role` is the App client ID.
+Confirm the App has exactly one Postgres resource, one serving-endpoint resource, and the three
+Temporal secret resources. The Postgres binding creates a Lakebase role whose `postgres_role` is
+the App client ID.
 
 ## 5. Create the worker's Lakebase role
 
@@ -346,6 +370,7 @@ Inject these secrets through the runtime:
 DATABRICKS_CLIENT_ID=<worker service-principal client ID>
 DATABRICKS_CLIENT_SECRET=<worker OAuth secret>
 TEMPORAL_API_KEY=<Temporal Cloud API key>
+GOOGLE_DRIVE_CREDENTIALS_FILE=<read-only mounted service-account key path, if ADC is unavailable>
 ```
 
 Set this non-secret environment:
@@ -363,6 +388,8 @@ LAKEBASE_ENDPOINT=projects/.../branches/.../endpoints/...
 LAKEBASE_POOL_MIN_SIZE=1
 LAKEBASE_POOL_MAX_SIZE=20
 LAKEBASE_APPLICATION_NAME=retrieval-demo-worker
+DATABRICKS_EMBEDDING_ENDPOINT=<1024-dimensional endpoint name>
+RETRIEVAL_EMBEDDING_DIMENSION=1024
 
 TEMPORAL_ADDRESS=<Temporal Cloud host:port>
 TEMPORAL_NAMESPACE=<namespace>
@@ -376,7 +403,15 @@ TEMPORAL_ENABLE_SEARCH_ATTRIBUTES=false
 TEMPORAL_SERVER_PRIORITY_FAIRNESS_SUPPORTED=false
 
 RETRIEVAL_DEMO_MODE=true
-RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.demo.scripted_provider:create_adapter_bundle
+RETRIEVAL_ADAPTER_BUNDLE_FACTORY=retrieval.google_drive.bundle:create_adapter_bundle
+RETRIEVAL_STAGING_BACKEND=lakebase
+RETRIEVAL_SEARCH_BACKEND=lakebase_hybrid
+GOOGLE_DRIVE_CREDENTIAL_KEY=workspace-primary
+GOOGLE_DRIVE_USER_KEY=drive-user
+GOOGLE_DRIVE_ROOT_FOLDER_ID=<stable folder ID>
+GOOGLE_DRIVE_HELD_FILE_ID=<stable held file ID>
+GOOGLE_DRIVE_MAX_FILE_BYTES=52428800
+GOOGLE_DRIVE_REQUEST_TIMEOUT=60
 OBJECT_CLEANUP_BATCH_SIZE=250
 ```
 
@@ -405,6 +440,9 @@ databricks bundle run retrieval_demo \
   -t "$BUNDLE_TARGET" \
   --var "lakebase_branch=$LB_BRANCH_NAME" \
   --var "lakebase_database=$LB_DATABASE_NAME" \
+  --var "embedding_endpoint=$EMBEDDING_ENDPOINT" \
+  --var "demo_held_document_key=gdrive:$DRIVE_HELD_FILE_ID" \
+  --var "google_drive_folder_url=$DRIVE_FOLDER_URL" \
   --var "temporal_secret_scope=$TEMPORAL_SECRET_SCOPE"
 ```
 
@@ -442,14 +480,14 @@ reachable, not application readiness.
 
 Use a fresh run:
 
-1. confirm `active`, generation 7, zero documents;
-2. start sync and observe one five-second quota wait/resume;
-3. confirm four committed documents and a held `late-security-review.md`;
-4. ask the default question and inspect four citations;
-5. start deactivation and wait for `active/7 → deactivating/8`;
-6. release the held write only after the fence;
-7. confirm stale rejection with expected 7 and actual 8;
-8. confirm final `inactive`, generation 8, zero documents/chunks.
+1. run preflight and confirm the stable folder plus held file are visible;
+2. create a generation-7 run and start sync;
+3. observe one five-second throttle wait/resume in the App and Temporal UI;
+4. confirm the non-held Drive files commit and chunks have BM25/vector ranks;
+5. ask a natural question about the current folder and inspect dynamic citations;
+6. start deactivation and wait for `active/7 → deactivating/8`;
+7. release the held writer only after the fence and confirm expected 7/actual 8 rejection;
+8. load Lakebase proof and confirm final `inactive`, generation 8, zero visible rows.
 
 Never rewind or reuse a contaminated run. Create another run for every rehearsal and presentation.
 
@@ -504,6 +542,9 @@ Temporal-compatible workers. Never alter an applied checksum or decrement a stor
 
 - [ ] Explicit Databricks OAuth profile recorded.
 - [ ] Dedicated Lakebase resources and capacity/retention settings recorded.
+- [ ] Lakebase Search Beta is enabled; hybrid BM25 and ANN indexes exist.
+- [ ] Embedding endpoint dimension is 1024; App and worker have `CAN_QUERY`.
+- [ ] Stable Drive folder and held-file IDs match App/worker configuration.
 - [ ] Secret scope contains address, namespace, and newline-free API key.
 - [ ] App resource has expected Postgres and secret bindings.
 - [ ] App and worker use distinct identities.
@@ -512,5 +553,5 @@ Temporal-compatible workers. Never alter an applied checksum or decrement a stor
 - [ ] Worker uses an immutable build and polls both queues.
 - [ ] App deployment is `SUCCEEDED`, status `RUNNING`, compute `ACTIVE`.
 - [ ] Authenticated `/healthz` and `/readyz` pass.
-- [ ] Fresh Northstar rehearsal passes through final zero-row state.
+- [ ] Fresh Google Drive rehearsal passes through final zero-visible-row state.
 - [ ] Rollback owner, prior App revision, and compatible worker build are recorded.

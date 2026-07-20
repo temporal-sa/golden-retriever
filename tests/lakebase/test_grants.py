@@ -77,7 +77,7 @@ async def test_grants_quote_roles_and_keep_app_off_core_dml() -> None:
     await apply_runtime_grants(provider, roles)
 
     rendered = [statement.as_string(None) for statement in provider.connection_instance.statements]
-    assert len(rendered) == 17
+    assert len(rendered) == 20
     assert any('TO "app role""quoted"' in statement for statement in rendered)
     assert any('TO "worker-role"' in statement for statement in rendered)
     app_statements = [statement for statement in rendered if 'TO "app role""quoted"' in statement]
@@ -88,4 +88,7 @@ async def test_grants_quote_roles_and_keep_app_off_core_dml() -> None:
         "retrieval.store_users" in statement and "retrieval.retrieval_state" in statement
         for statement in app_statements
     )
-    assert any("create_northstar_run" in statement for statement in app_statements)
+    assert any("create_demo_run" in statement for statement in app_statements)
+    assert any("generation_proof" in statement for statement in app_statements)
+    assert any("retrieval_connector" in statement for statement in rendered)
+    assert any("GRANT MAINTAIN ON retrieval.document_chunks" in statement for statement in rendered)

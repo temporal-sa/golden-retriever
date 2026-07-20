@@ -144,6 +144,19 @@ class DemoStateStore(Protocol):
         self, receipt: ApiIdempotencyReceipt
     ) -> ApiIdempotencyReceipt: ...
 
+    async def generation_proof(self, store_key: str) -> Mapping[str, Any]: ...
+
+    async def put_preflight(
+        self,
+        *,
+        request_id: str,
+        workflow_id: str,
+        status: str,
+        result: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]: ...
+
+    async def get_preflight(self, workflow_id: str) -> Mapping[str, Any]: ...
+
 
 def validate_event(event: DemoEvent) -> None:
     if event.event_type not in REQUIRED_EVENT_TYPES:
@@ -174,6 +187,7 @@ class InMemoryDemoStateStore:
         self._events_by_key: dict[tuple[str, str], DemoEvent] = {}
         self._operations: dict[str, DemoOperation] = {}
         self._receipts: dict[tuple[str, str], ApiIdempotencyReceipt] = {}
+        self._preflights: dict[str, dict[str, Any]] = {}
         self._release_events: dict[str, asyncio.Event] = {}
         self._lock = asyncio.Lock()
         self._started = False
@@ -478,6 +492,48 @@ class InMemoryDemoStateStore:
             self._receipts[key] = receipt
             return receipt
 
+    async def generation_proof(self, store_key: str) -> Mapping[str, Any]:
+        async with self._lock:
+            run_id = self._run_by_store.get(store_key)
+            if run_id is None:
+                raise DemoNotFoundError(f"unknown demo store {store_key!r}")
+            return {
+                "store_key": store_key,
+                "durable_demo_events": len(self._events[run_id]),
+                "durable_api_receipts": len(self._receipts),
+                "backend": "in_memory",
+            }
+
+    async def put_preflight(
+        self,
+        *,
+        request_id: str,
+        workflow_id: str,
+        status: str,
+        result: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        async with self._lock:
+            existing = self._preflights.get(workflow_id)
+            if existing is not None and existing["request_id"] != request_id:
+                raise DemoIdempotencyConflictError("preflight workflow ID was reused")
+            if existing is not None and existing["status"] != "running":
+                return dict(existing)
+            record = {
+                "request_id": request_id,
+                "workflow_id": workflow_id,
+                "status": status,
+                "result": None if result is None else dict(result),
+            }
+            self._preflights[workflow_id] = record
+            return dict(record)
+
+    async def get_preflight(self, workflow_id: str) -> Mapping[str, Any]:
+        async with self._lock:
+            try:
+                return dict(self._preflights[workflow_id])
+            except KeyError as exc:
+                raise DemoNotFoundError(f"unknown preflight {workflow_id!r}") from exc
+
     def _require_run(self, run_id: str) -> DemoRun:
         try:
             return self._runs[run_id]
@@ -535,10 +591,95 @@ class PostgresDemoStateStore:
         if self._owns_provider:
             await self._provider.aclose()
 
+    async def generation_proof(self, store_key: str) -> Mapping[str, Any]:
+        async with self._provider.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM retrieval_demo_ui.generation_proof(%s)",
+                (store_key,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise DemoNotFoundError(f"unknown demo store {store_key!r}")
+        names = (
+            "lifecycle_state",
+            "lifecycle_generation",
+            "physical_documents",
+            "physical_chunks",
+            "durable_write_receipts",
+            "visible_documents",
+            "visible_chunks",
+        )
+        values = {name: _row_value(row, name, index) for index, name in enumerate(names)}
+        return {
+            "store_key": store_key,
+            "lifecycle_state": str(values["lifecycle_state"]),
+            "lifecycle_generation": int(values["lifecycle_generation"]),
+            **{name: int(values[name]) for name in names[2:]},
+            "visibility_rule": ("state IN (active,syncing) AND row.generation = store.generation"),
+            "backend": "lakebase",
+        }
+
+    async def put_preflight(
+        self,
+        *,
+        request_id: str,
+        workflow_id: str,
+        status: str,
+        result: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        encoded = None if result is None else json.dumps(dict(result), sort_keys=True)
+        async with self._provider.connection() as connection:
+            await connection.execute(
+                """
+                INSERT INTO retrieval_demo_ui.preflight_runs (
+                    workflow_id, request_id, status, result
+                ) VALUES (%s, %s, %s, %s::jsonb)
+                ON CONFLICT (workflow_id) DO UPDATE
+                SET status = CASE
+                        WHEN retrieval_demo_ui.preflight_runs.status = 'running'
+                        THEN EXCLUDED.status
+                        ELSE retrieval_demo_ui.preflight_runs.status
+                    END,
+                    result = CASE
+                        WHEN retrieval_demo_ui.preflight_runs.status = 'running'
+                        THEN COALESCE(EXCLUDED.result, retrieval_demo_ui.preflight_runs.result)
+                        ELSE retrieval_demo_ui.preflight_runs.result
+                    END,
+                    updated_at = clock_timestamp()
+                WHERE retrieval_demo_ui.preflight_runs.request_id = EXCLUDED.request_id
+                """,
+                (workflow_id, request_id, status, encoded),
+            )
+        persisted = await self.get_preflight(workflow_id)
+        if persisted["request_id"] != request_id:
+            raise DemoIdempotencyConflictError("preflight workflow ID was reused")
+        return persisted
+
+    async def get_preflight(self, workflow_id: str) -> Mapping[str, Any]:
+        async with self._provider.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT request_id, workflow_id, status, result
+                FROM retrieval_demo_ui.preflight_runs
+                WHERE workflow_id = %s
+                """,
+                (workflow_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise DemoNotFoundError(f"unknown preflight {workflow_id!r}")
+        raw_result = _row_value(row, "result", 3)
+        return {
+            "request_id": str(_row_value(row, "request_id", 0)),
+            "workflow_id": str(_row_value(row, "workflow_id", 1)),
+            "status": str(_row_value(row, "status", 2)),
+            "result": (json.loads(raw_result) if isinstance(raw_result, str) else raw_result),
+        }
+
     async def create_run(self, run: DemoRun, controls: DemoControls) -> DemoRun:
         async with self._provider.connection() as connection, connection.transaction():
             await connection.execute(
-                "SELECT retrieval_demo_ui.create_northstar_run(%s,%s,%s,%s,%s,%s,%s)",
+                "SELECT retrieval_demo_ui.create_demo_run(%s,%s,%s,%s,%s,%s,%s)",
                 (
                     run.run_id,
                     run.store_key,

@@ -87,6 +87,32 @@ class FakeDemoService:
             },
         )
 
+    async def start_preflight(self, *, idempotency_key: str) -> object:
+        return self._idempotent(
+            idempotency_key,
+            "preflight",
+            {},
+            {"workflow_id": "retrieval-preflight-demo", "status": "running"},
+        )
+
+    async def get_preflight(self, workflow_id: str) -> object:
+        return {
+            "workflow_id": workflow_id,
+            "status": "completed",
+            "result": {
+                "files": [{"name": "Roadmap", "searchable": True}],
+                "folders_scanned": 1,
+            },
+        }
+
+    async def get_proof(self, run_id: str) -> object:
+        self._assert_run(run_id)
+        return {
+            "lifecycle_generation": self.lifecycle_generation,
+            "visible_documents": 0 if self.lifecycle_state != "active" else 4,
+            "durable_write_receipts": 4,
+        }
+
     async def get_snapshot(self, run_id: str) -> object:
         self._assert_run(run_id)
         return {
@@ -267,15 +293,46 @@ async def test_lifespan_health_and_static_ui() -> None:
 
         page = await client.get("/")
         assert page.status_code == 200
-        assert "Account workspace" in page.text
-        assert "Workflow topology" in page.text
-        assert "Retrieved answer" in page.text
-        assert "Failure lab" in page.text
+        assert "Retrieval that stays correct" in page.text
+        assert "Reject late write" in page.text
+        assert "Workflow links" in page.text
+        assert "Retrieve evidence" in page.text
+        assert "Release the old writer" in page.text
         script = await client.get("/app.js")
         assert script.status_code == 200
         assert "Retry deactivation" in script.text
 
     assert service.closed
+
+
+async def test_preflight_source_files_tooling_and_proof_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FakeDemoService()
+    monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_URL", "https://drive.google.com/drive/folders/demo")
+    monkeypatch.setenv("TEMPORAL_WEB_BASE_URL", "https://temporal.example.test")
+    monkeypatch.setenv("LAKEBASE_TOOLING_URL", "https://workspace.example.test/lakebase")
+
+    async with demo_client(service) as client:
+        started = await client.post(
+            "/api/preflight",
+            headers={"Idempotency-Key": "preflight-1"},
+        )
+        assert started.status_code == 202
+        workflow_id = started.json()["workflow_id"]
+
+        files = await client.get(f"/api/preflight/{workflow_id}/source-files")
+        assert files.json()["files"][0]["name"] == "Roadmap"
+        proof = await client.get(f"/api/demo/runs/{service.run_id}/proof")
+        assert proof.json()["durable_write_receipts"] == 4
+        tooling = await client.get("/api/demo/tooling")
+        assert tooling.json()["google_drive"].startswith("https://drive.google.com/")
+
+        monkeypatch.setenv(
+            "LAKEBASE_TOOLING_URL", "https://workspace.example.test/lakebase?token=x"
+        )
+        tooling = await client.get("/api/demo/tooling")
+        assert tooling.json()["lakebase"] is None
 
 
 async def test_lazy_runtime_closes_partially_started_service(

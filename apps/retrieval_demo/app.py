@@ -53,6 +53,12 @@ class DemoApplicationService(Protocol):
 
     async def create_run(self, *, idempotency_key: str) -> object: ...
 
+    async def start_preflight(self, *, idempotency_key: str) -> object: ...
+
+    async def get_preflight(self, workflow_id: str) -> object: ...
+
+    async def get_proof(self, run_id: str) -> object: ...
+
     async def get_snapshot(self, run_id: str) -> object: ...
 
     async def start_sync(self, run_id: str, *, idempotency_key: str) -> object: ...
@@ -109,6 +115,15 @@ class LazyRuntimeService:
 
     async def create_run(self, *, idempotency_key: str) -> object:
         return await self._service().create_run(idempotency_key=idempotency_key)
+
+    async def start_preflight(self, *, idempotency_key: str) -> object:
+        return await self._service().start_preflight(idempotency_key=idempotency_key)
+
+    async def get_preflight(self, workflow_id: str) -> object:
+        return await self._service().get_preflight(workflow_id)
+
+    async def get_proof(self, run_id: str) -> object:
+        return await self._service().get_proof(run_id)
 
     async def get_snapshot(self, run_id: str) -> object:
         return await self._service().get_snapshot(run_id)
@@ -310,6 +325,23 @@ def _temporal_workflow_url(workflow_id: str) -> str | None:
     return candidate
 
 
+def _safe_tool_url(name: str) -> str | None:
+    candidate = os.environ.get(name, "").strip()
+    if not candidate:
+        return None
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return candidate
+
+
 def _add_temporal_links(payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
@@ -404,6 +436,46 @@ def create_app(service: DemoApplicationService | None = None) -> FastAPI:
         )
         return JSONResponse(status_code=http_status, content=_to_json(readiness))
 
+    @application.get("/api/demo/tooling", tags=["demo"])
+    async def tooling() -> dict[str, str | None]:
+        return {
+            "google_drive": _safe_tool_url("GOOGLE_DRIVE_FOLDER_URL"),
+            "temporal": _safe_tool_url("TEMPORAL_WEB_BASE_URL"),
+            "lakebase": _safe_tool_url("LAKEBASE_TOOLING_URL"),
+        }
+
+    @application.post(
+        "/api/preflight",
+        status_code=status.HTTP_202_ACCEPTED,
+        tags=["demo"],
+    )
+    @application.post(
+        "/api/demo/preflight",
+        status_code=status.HTTP_202_ACCEPTED,
+        tags=["demo"],
+    )
+    async def start_preflight(
+        idempotency_key: str = Depends(_required_idempotency_key),
+    ) -> object:
+        return _add_temporal_links(
+            _to_json(await application_service.start_preflight(idempotency_key=idempotency_key))
+        )
+
+    @application.get("/api/preflight/{workflow_id}", tags=["demo"])
+    @application.get("/api/demo/preflight/{workflow_id}", tags=["demo"])
+    async def get_preflight(workflow_id: str) -> object:
+        return _add_temporal_links(
+            _to_json(await application_service.get_preflight(_operation_id(workflow_id)))
+        )
+
+    @application.get("/api/preflight/{workflow_id}/source-files", tags=["demo"])
+    @application.get("/api/demo/preflight/{workflow_id}/source-files", tags=["demo"])
+    async def get_source_files(workflow_id: str) -> object:
+        payload = _to_json(await application_service.get_preflight(_operation_id(workflow_id)))
+        result = payload.get("result", {}) if isinstance(payload, Mapping) else {}
+        files = result.get("files", []) if isinstance(result, Mapping) else []
+        return {"workflow_id": workflow_id, "files": files}
+
     @application.post("/api/demo/runs", status_code=status.HTTP_201_CREATED, tags=["demo"])
     async def create_run(
         idempotency_key: str = Depends(_required_idempotency_key),
@@ -437,6 +509,10 @@ def create_app(service: DemoApplicationService | None = None) -> FastAPI:
                 if isinstance(event_id, int):
                     next_after = max(next_after, event_id)
         return {"events": event_list, "next_after_event_id": next_after}
+
+    @application.get("/api/demo/runs/{run_id}/proof", tags=["demo"])
+    async def get_proof(run_id: UUID) -> object:
+        return _to_json(await application_service.get_proof(str(run_id)))
 
     @application.get("/api/demo/runs/{run_id}/search", tags=["demo"])
     async def search(

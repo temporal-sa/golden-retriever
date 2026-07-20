@@ -73,6 +73,36 @@ class ResourcePageManifest:
     quota_exhausted: bool = False
 
 
+@dataclass(frozen=True)
+class ProviderPreflightRequest:
+    request_id: str
+    max_files: int = 100
+    max_folders: int = 100
+    page_size: int = 100
+    provider_task_queue: str = "retrieval-provider-v2"
+
+
+@dataclass(frozen=True)
+class ProviderPreflightFile:
+    document_key: str
+    name: str
+    mime_type: str
+    modified_time: str
+    source_uri: str | None
+    searchable: bool
+    held_for_demo: bool = False
+
+
+@dataclass(frozen=True)
+class ProviderPreflightResult:
+    request_id: str
+    provider: str
+    root_folder_id: str | None
+    files: tuple[ProviderPreflightFile, ...]
+    folders_scanned: int
+    truncated: bool = False
+
+
 class ProviderQuotaExhausted(RuntimeError):
     def __init__(
         self,
@@ -108,6 +138,8 @@ class ProviderGateway(Protocol):
         self, request: FetchResourcePageRequest
     ) -> ResourcePageManifest: ...
 
+    async def preflight(self, request: ProviderPreflightRequest) -> ProviderPreflightResult: ...
+
 
 class EmptyProviderGateway:
     """Safe local adapter that produces no work; production must inject a connector."""
@@ -119,6 +151,15 @@ class EmptyProviderGateway:
         return ResourcePageManifest(
             request_id=request.request_id,
             page_key=request.cursor or "initial",
+        )
+
+    async def preflight(self, request: ProviderPreflightRequest) -> ProviderPreflightResult:
+        return ProviderPreflightResult(
+            request_id=request.request_id,
+            provider="empty",
+            root_folder_id=None,
+            files=(),
+            folders_scanned=0,
         )
 
 
@@ -179,6 +220,30 @@ class ProviderActivities:
                 observation=self._observation(request.quota_scope, request.request_id, exc),
                 quota_exhausted=True,
             )
+        except InvalidCredentialsError as exc:
+            metrics.increment(PROVIDER_REQUESTS, attributes={"status": "invalid_credentials"})
+            raise ApplicationError(str(exc), type="InvalidCredentials", non_retryable=True) from exc
+        except ProviderRequestError as exc:
+            metrics.increment(PROVIDER_REQUESTS, attributes={"status": "rejected"})
+            raise ApplicationError(str(exc), type=exc.error_type, non_retryable=True) from exc
+        except Exception:
+            metrics.increment(PROVIDER_REQUESTS, attributes={"status": "failed"})
+            raise
+
+    @activity.defn(name="provider_preflight")
+    async def preflight(self, request: ProviderPreflightRequest) -> ProviderPreflightResult:
+        metrics = self._metrics(None, "preflight")
+        try:
+            result = await self._gateway.preflight(request)
+            metrics.increment(PROVIDER_REQUESTS, attributes={"status": "succeeded"})
+            return result
+        except ProviderQuotaExhausted as exc:
+            metrics.increment(PROVIDER_REQUESTS, attributes={"status": "quota_exhausted"})
+            metrics.increment(PROVIDER_QUOTA_EXHAUSTED)
+            raise ApplicationError(
+                "provider quota exhausted during preflight",
+                type="ProviderQuotaExhausted",
+            ) from exc
         except InvalidCredentialsError as exc:
             metrics.increment(PROVIDER_REQUESTS, attributes={"status": "invalid_credentials"})
             raise ApplicationError(str(exc), type="InvalidCredentials", non_retryable=True) from exc

@@ -12,6 +12,7 @@ from retrieval.google_drive.models import (
     DriveFilesPage,
     DriveQuotaExhausted,
 )
+from retrieval.google_drive.pdf import PdfTextExtractionError
 from retrieval.google_drive.provider import (
     GOOGLE_FOLDER_MIME_TYPE,
     GoogleDriveProviderGateway,
@@ -21,6 +22,7 @@ from retrieval.temporal.activities.provider_api import (
     FetchResourcePageRequest,
     InvalidCredentialsError,
     ListActiveUsersRequest,
+    ProviderPreflightRequest,
     ProviderQuotaExhausted,
     ProviderRequestError,
 )
@@ -121,7 +123,7 @@ async def test_provider_recurses_stages_text_and_reconciles_removed_files(tmp_pa
             files=(DriveFile("text-2", "Notes.txt", "text/plain", md5_checksum="abc"),)
         ),
         ("nested", None): DriveFilesPage(
-            files=(DriveFile("pdf-ignored", "Binary.pdf", "application/pdf"),)
+            files=(DriveFile("binary-ignored", "Binary.zip", "application/zip"),)
         ),
     }
     api.bodies = {"doc-1": b"Q3 roadmap", "text-2": b"launch notes"}
@@ -170,6 +172,88 @@ async def test_provider_recurses_stages_text_and_reconciles_removed_files(tmp_pa
     )
     assert retried_final.deleted_document_keys == ("gdrive:text-2",)
     assert len(api.list_calls) == calls_before_retry
+
+
+async def test_provider_extracts_and_stages_pdf_text(tmp_path: Path, monkeypatch) -> None:
+    api = FakeDriveApi()
+    api.pages = {
+        ("root-folder", None): DriveFilesPage(
+            files=(
+                DriveFile(
+                    "manual-pdf",
+                    "FlightFactor manual.pdf",
+                    "application/pdf",
+                    size=1_024,
+                    web_view_link="https://drive.google.com/file/d/manual-pdf/view",
+                ),
+            )
+        )
+    }
+    api.bodies = {"manual-pdf": b"%PDF-test-body"}
+    monkeypatch.setattr(
+        "retrieval.google_drive.provider.extract_pdf_text",
+        lambda body, *, max_text_bytes: "Page 1\n\nFlight controls and landing checklist.",
+    )
+    staging = GoogleDriveStagingStore(tmp_path)
+    gateway = GoogleDriveProviderGateway(_config(tmp_path), api, staging)
+
+    manifests = await _fetch_all(gateway, "pdf-sync")
+
+    references = [document for page in manifests for document in page.documents]
+    assert [document.document_key for document in references] == ["gdrive:manual-pdf"]
+    assert api.download_calls == [("manual-pdf", None)]
+    staged = await staging.get(references[0].staging_uri)
+    assert b"title: FlightFactor manual.pdf" in staged
+    assert b"Page 1\n\nFlight controls and landing checklist." in staged
+
+
+async def test_provider_fails_when_configured_held_pdf_cannot_be_extracted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    api = FakeDriveApi()
+    api.pages = {
+        ("root-folder", None): DriveFilesPage(
+            files=(DriveFile("held-pdf", "Held.pdf", "application/pdf", size=100),)
+        )
+    }
+    api.bodies = {"held-pdf": b"not-a-pdf"}
+
+    def fail_extraction(body: bytes, *, max_text_bytes: int) -> str:
+        raise PdfTextExtractionError("broken PDF")
+
+    monkeypatch.setattr("retrieval.google_drive.provider.extract_pdf_text", fail_extraction)
+    config = replace(_config(tmp_path), held_file_id="held-pdf")
+    gateway = GoogleDriveProviderGateway(config, api, GoogleDriveStagingStore(tmp_path))
+
+    with pytest.raises(ProviderRequestError) as raised:
+        await gateway.fetch_resource_page(_request("held-pdf-sync"))
+
+    assert raised.value.error_type == "GoogleDriveHeldFileUnreadable"
+
+
+async def test_preflight_recurses_metadata_without_downloading_bodies(tmp_path: Path) -> None:
+    api = FakeDriveApi()
+    api.pages = {
+        ("root-folder", None): DriveFilesPage(
+            files=(
+                DriveFile("nested", "Nested", GOOGLE_FOLDER_MIME_TYPE),
+                DriveFile("doc-2", "Zeta", "text/plain", modified_time="2026-07-20"),
+            )
+        ),
+        ("nested", None): DriveFilesPage(
+            files=(DriveFile("doc-1", "Alpha", "application/vnd.google-apps.document"),)
+        ),
+    }
+    gateway = GoogleDriveProviderGateway(_config(tmp_path), api, GoogleDriveStagingStore(tmp_path))
+
+    result = await gateway.preflight(ProviderPreflightRequest("preflight-1"))
+
+    assert [item.name for item in result.files] == ["Alpha", "Zeta"]
+    assert result.files[0].held_for_demo
+    assert all(item.searchable for item in result.files)
+    assert result.folders_scanned == 2
+    assert api.download_calls == []
 
 
 async def test_provider_splits_reconciliation_tombstones_into_bounded_pages(
