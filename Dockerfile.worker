@@ -22,7 +22,7 @@ WORKDIR /workspace
 ENV PATH="/workspace/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    DATABRICKS_EMBEDDING_ENDPOINT=system.ai.gte-large-en
+    DATABRICKS_EMBEDDING_ENDPOINT=retrieval-demo-gte-large-en
 
 COPY --from=builder --chown=retrieval:retrieval /workspace/.venv ./.venv
 USER retrieval
