@@ -157,6 +157,7 @@ async def test_hybrid_search_fuses_bm25_and_ann_after_generation_filtering() -> 
     sql, params = connection.calls[0]
     assert "lakebase_bm25" not in sql
     assert "to_bm25query" in sql
+    assert "'retrieval.document_chunks_search_bm25_idx'" in sql
     assert "c.embedding <=> %s::vector" in sql
     assert sql.count("d.lifecycle_generation = s.lifecycle_generation") >= 3
     assert sql.count("c.lifecycle_generation = s.lifecycle_generation") >= 3

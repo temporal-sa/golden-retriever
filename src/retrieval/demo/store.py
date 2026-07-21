@@ -1007,7 +1007,7 @@ class PostgresDemoStateStore:
                 "('completed','failed','canceled','rejected') "
                 "AND NOT (status='running' AND %s='accepted')) "
                 "OR (status='failed' AND workflow_id IS NULL AND "
-                "((%s='accepted' AND %s IS NOT NULL) OR %s='rejected'))) "
+                "((%s='accepted' AND %s::text IS NOT NULL) OR %s='rejected'))) "
                 "RETURNING operation_id,run_id::text,store_key,"
                 "operation_type,status,command_id,workflow_id,lifecycle_generation,result,message,"
                 "created_at,updated_at",

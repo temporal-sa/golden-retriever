@@ -8,10 +8,11 @@ from typing import Any
 
 import httpx
 import pytest
-from apps.retrieval_demo.app import DemoApplicationService, create_app
+from apps.retrieval_demo.app import DemoApplicationService, _error_response, create_app
 
 from retrieval.demo.config import DemoConfig
 from retrieval.demo.fixtures import load_northstar_scenario
+from retrieval.demo.models import DemoConflictError
 from retrieval.demo.service import DemoService, InMemoryTextSearch
 from retrieval.demo.store import InMemoryDemoStateStore
 from retrieval.temporal.activities.repositories import InMemoryRetrievalRepository
@@ -22,6 +23,16 @@ class FakeDomainError(RuntimeError):
         self.status_code = status_code
         self.error_code = error_code
         super().__init__("sensitive implementation detail that must not reach the client")
+
+
+def test_trusted_demo_conflicts_return_actionable_messages() -> None:
+    response = _error_response(
+        DemoConflictError("Create a fresh run before starting another ingestion scan.")
+    )
+
+    assert response.status_code == 409
+    assert b"Create a fresh run" in response.body
+    assert b"current demo state" not in response.body
 
 
 @dataclass
@@ -319,6 +330,8 @@ async def test_lifespan_health_and_static_ui() -> None:
         assert script.status_code == 200
         assert "Retry deactivation" in script.text
         assert "/workflows/end" in script.text
+        assert 'safeStorageRemove("retrieval-demo-preflight-id")' in script.text
+        assert 'safeStorageRemove("retrieval-demo-run-id")' in script.text
 
         ended = await client.post(
             f"/api/demo/runs/{service.run_id}/workflows/end",

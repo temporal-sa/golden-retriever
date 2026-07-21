@@ -13,6 +13,7 @@ const state = {
 
 function safeStorageGet(key) { try { return window.localStorage.getItem(key); } catch { return null; } }
 function safeStorageSet(key, value) { try { window.localStorage.setItem(key, value); } catch { /* optional */ } }
+function safeStorageRemove(key) { try { window.localStorage.removeItem(key); } catch { /* optional */ } }
 function idempotencyKey(action) { return `retrieval-demo:${action}:${window.crypto?.randomUUID?.() ?? Date.now()}`; }
 function setText(id, value) { const node = $(id); if (node) node.textContent = value ?? "—"; }
 function get(object, ...paths) { for (const path of paths) { const found = path.split(".").reduce((current, key) => current?.[key], object); if (found !== undefined && found !== null) return found; } return undefined; }
@@ -22,7 +23,11 @@ function hasActiveOperation(type) { return [...state.operations.values()].some((
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { Accept: "application/json", ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers ?? {}) } });
   const payload = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(payload?.error?.message ?? payload?.detail?.message ?? `Request failed (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(payload?.error?.message ?? payload?.detail?.message ?? `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
 
@@ -217,9 +222,24 @@ async function loadPlatformReadiness() {
 
 async function pollPreflight() {
   if (!state.preflightWorkflowId) return;
-  const payload = await api(`/api/preflight/${encodeURIComponent(state.preflightWorkflowId)}`);
-  setText("preflight-status", payload.status === "completed" ? `Connected · ${payload.result?.files?.length ?? 0} files · ${payload.result?.folders_scanned ?? 0} folders` : `Temporal preflight: ${payload.status}`);
-  if (payload.status === "completed") { renderFiles(payload.result?.files ?? []); activateStep("sync"); }
+  let payload;
+  try {
+    payload = await api(`/api/preflight/${encodeURIComponent(state.preflightWorkflowId)}`);
+  } catch (error) {
+    if (error?.status !== 404) throw error;
+    state.preflightWorkflowId = null;
+    safeStorageRemove("retrieval-demo-preflight-id");
+    setText("preflight-status", "Previous inspection is no longer available. Inspect the Drive folder to start a fresh one.");
+    return;
+  }
+  const status = String(payload.status).toLowerCase();
+  setText("preflight-status", status === "completed" ? `Connected · ${payload.result?.files?.length ?? 0} files · ${payload.result?.folders_scanned ?? 0} folders` : `Temporal preflight: ${status}`);
+  if (status === "completed") { renderFiles(payload.result?.files ?? []); activateStep("sync"); }
+  if (["completed", "failed", "canceled", "terminated", "timed_out"].includes(status)) {
+    state.preflightWorkflowId = null;
+    safeStorageRemove("retrieval-demo-preflight-id");
+    if (status !== "completed") setText("preflight-status", "Previous inspection ended. Inspect the Drive folder to start a fresh one.");
+  }
 }
 
 async function refresh() {
@@ -232,7 +252,17 @@ async function refresh() {
       const operation = await api(`/api/operations/${encodeURIComponent(id)}`); state.operations.set(id, operation);
     }
     renderOperations();
-  } catch (error) { showError(error); }
+  } catch (error) {
+    if (error?.status === 404 && state.runId) {
+      state.runId = null;
+      state.events = [];
+      state.operations.clear();
+      safeStorageRemove("retrieval-demo-run-id");
+      setText("manager-status", "The previous demo run is no longer available. Create a fresh run to continue.");
+      return;
+    }
+    showError(error);
+  }
 }
 
 function renderOperations() {

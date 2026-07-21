@@ -762,7 +762,9 @@ class DemoService:
             StoreLifecycleState.ACTIVE,
             StoreLifecycleState.SYNCING,
         }:
-            raise DemoConflictError("search is disabled after deactivation begins")
+            raise DemoConflictError(
+                "This run is no longer searchable. Create a fresh run to search the folder again."
+            )
         raw_hits = await self._search.search(run.store_key, query, limit)
         return tuple(_normalize_hit(hit) for hit in raw_hits)
 
@@ -790,7 +792,9 @@ class DemoService:
             StoreLifecycleState.ACTIVE,
             StoreLifecycleState.SYNCING,
         }:
-            raise DemoConflictError("answers are disabled after deactivation begins")
+            raise DemoConflictError(
+                "This run is no longer searchable. Create a fresh run before retrieving evidence."
+            )
         hits = await self.search(run_id, normalized_question, limit=12)
         answer = _evidence_answer(
             normalized_question,
@@ -885,9 +889,14 @@ class DemoService:
             if operation_type is DemoOperationType.DEACTIVATION:
                 allowed_states.add(StoreLifecycleState.DEACTIVATION_FAILED)
             if store.lifecycle_state not in allowed_states:
+                next_step = (
+                    "Create a fresh run before starting another ingestion scan."
+                    if operation_type is DemoOperationType.SYNC
+                    else "Create a fresh run before advancing another generation."
+                )
                 raise DemoConflictError(
                     f"{operation_type.value} cannot start while the store is "
-                    f"{store.lifecycle_state.value}"
+                    f"{store.lifecycle_state.value}. {next_step}"
                 ) from None
             operation = await self._state_store.put_operation(
                 DemoOperation(

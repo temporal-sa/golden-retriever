@@ -145,7 +145,7 @@ WITH keyword_scored AS (
         c.chunk_ordinal,
         c.search_vector <@> to_bm25query(
             to_tsvector('english', %s),
-            'document_chunks_search_bm25_idx'
+            'retrieval.document_chunks_search_bm25_idx'
         ) AS distance
     FROM retrieval.document_chunks AS c
     JOIN retrieval.documents AS d

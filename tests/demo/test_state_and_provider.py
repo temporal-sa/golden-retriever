@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 
 import pytest
@@ -17,7 +18,7 @@ from retrieval.demo.models import (
     DemoRunStatus,
 )
 from retrieval.demo.scripted_provider import ScriptedNorthstarProvider
-from retrieval.demo.store import InMemoryDemoStateStore
+from retrieval.demo.store import InMemoryDemoStateStore, PostgresDemoStateStore
 from retrieval.temporal.activities.provider_api import (
     ListActiveUsersRequest,
     ProviderPreflightRequest,
@@ -217,3 +218,47 @@ async def test_failed_submission_without_workflow_id_can_recover_once() -> None:
 
     assert recovered.status is DemoOperationStatus.ACCEPTED
     assert recovered.workflow_id == "store-sync/recovered"
+
+
+async def test_postgres_operation_update_types_optional_workflow_id() -> None:
+    class Cursor:
+        async def fetchone(self):
+            return {
+                "operation_id": "sync-operation",
+                "run_id": "00000000-0000-0000-0000-000000000007",
+                "store_key": "northstar-000000000007",
+                "operation_type": "sync",
+                "status": "accepted",
+                "command_id": "sync-command",
+                "workflow_id": "store-sync/workflow",
+                "lifecycle_generation": 7,
+                "result": {"duplicate": False},
+                "message": None,
+                "created_at": None,
+                "updated_at": None,
+            }
+
+    class Connection:
+        sql = ""
+
+        async def execute(self, sql, _params):
+            self.sql = " ".join(sql.split())
+            return Cursor()
+
+    connection = Connection()
+
+    class Provider:
+        @asynccontextmanager
+        async def connection(self):
+            yield connection
+
+    operation = await PostgresDemoStateStore(Provider()).update_operation(
+        "sync-operation",
+        DemoOperationStatus.ACCEPTED,
+        workflow_id="store-sync/workflow",
+        lifecycle_generation=7,
+        result={"duplicate": False},
+    )
+
+    assert operation.workflow_id == "store-sync/workflow"
+    assert "%s::text IS NOT NULL" in connection.sql

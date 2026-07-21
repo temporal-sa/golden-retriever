@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from retrieval.demo.models import DemoConflictError
 from retrieval.environment import inject_environment
 
 STATIC_DIRECTORY = Path(__file__).with_name("static")
@@ -258,14 +259,16 @@ def _error_response(exc: Exception) -> JSONResponse:
         error_code = "internal_error"
     return JSONResponse(
         status_code=http_status,
-        content={"error": {"code": error_code, "message": _safe_error_message(http_status)}},
+        content={"error": {"code": error_code, "message": _safe_error_message(exc, http_status)}},
     )
 
 
-def _safe_error_message(http_status: int) -> str:
+def _safe_error_message(exc: Exception, http_status: int) -> str:
+    if isinstance(exc, DemoConflictError) and str(exc).strip():
+        return str(exc).strip()
     return {
         status.HTTP_404_NOT_FOUND: "The requested demo resource was not found.",
-        status.HTTP_409_CONFLICT: "The request conflicts with the current demo state.",
+        status.HTTP_409_CONFLICT: "The command was rejected. Refresh the run status and retry.",
         status.HTTP_503_SERVICE_UNAVAILABLE: "A required service is temporarily unavailable.",
     }.get(http_status, "The request could not be completed.")
 
