@@ -129,5 +129,25 @@ def provider_activity_options(
     return options
 
 
+def provider_resource_page_activity_options(
+    *,
+    task_queue: str,
+    work_class: WorkClass,
+    quota_scope: QuotaScope | None,
+    priority_fairness_enabled: bool,
+) -> dict[str, Any]:
+    """Provider policy for page fetches that may include slow remote traversal."""
+
+    options = provider_activity_options(
+        task_queue=task_queue,
+        work_class=work_class,
+        quota_scope=quota_scope,
+        priority_fairness_enabled=priority_fairness_enabled,
+    )
+    options["start_to_close_timeout"] = timedelta(minutes=5)
+    options["schedule_to_close_timeout"] = timedelta(minutes=30)
+    return options
+
+
 def current_workflow_id() -> str:
     return workflow.info().workflow_id

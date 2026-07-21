@@ -28,7 +28,24 @@ async function api(path, options = {}) {
 
 function showError(error) { setText("error-banner", error instanceof Error ? error.message : String(error)); $("error-banner").hidden = false; }
 function clearError() { $("error-banner").hidden = true; }
-function setBusy(button, busy, label) { if (busy) { button.dataset.label = button.textContent; button.textContent = label; } else if (button.dataset.label) button.textContent = button.dataset.label; button.disabled = busy; }
+function setBusy(button, busy, label) {
+  if (busy) {
+    button.dataset.label = button.textContent;
+    button.dataset.busy = "true";
+    button.setAttribute("aria-busy", "true");
+    button.textContent = label;
+  } else {
+    if (button.dataset.label) button.textContent = button.dataset.label;
+    delete button.dataset.label;
+    delete button.dataset.busy;
+    button.removeAttribute("aria-busy");
+  }
+}
+
+function requireRun() {
+  if (!state.runId) throw new Error("Create a fresh run first.");
+  return state.runId;
+}
 
 function database(snapshot) { return get(snapshot, "database", "store", "store_snapshot") ?? snapshot?.store ?? snapshot ?? {}; }
 function controls(snapshot) { return get(snapshot, "controls", "demo_controls") ?? {}; }
@@ -47,10 +64,7 @@ function renderWorkflowManager(snapshot) {
   setText("manager-generation", gen >= 0 ? gen : "—");
   setText("manager-active-ingestion", syncIds.length);
   setText("manager-state", hasRun ? life : "No run selected");
-  $("manager-end").disabled = !hasRun || syncIds.length === 0;
-  $("manager-increment").disabled = !hasRun || deactivationActive || !["active", "syncing", "deactivation_failed"].includes(life);
-  $("manager-scan").disabled = !hasRun || life !== "active" || syncIds.length > 0 || deactivationActive;
-  if (!hasRun) setText("manager-status", "Create a run to enable workflow controls.");
+  if (!hasRun) setText("manager-status", "Create a run before submitting a workflow command.");
   else if (deactivationActive) setText("manager-status", "Generation advancement is in progress.");
   else if (syncIds.length) setText("manager-status", `${syncIds.length} ingestion workflow${syncIds.length === 1 ? " is" : "s are"} active.`);
   else if (life === "active") setText("manager-status", "Ready for a fresh ingestion scan.");
@@ -101,13 +115,7 @@ function renderSnapshot(snapshot) {
   const held = state.events.some((event) => event.event_type === "document_commit_held");
   const released = Boolean(control.release_requested);
   const fenced = gen >= Number(get(snapshot, "run.baseline_generation") ?? 7) + 1;
-  $("sync").disabled = life !== "active" || hasActiveOperation("sync");
-  $("ask").disabled = life !== "active" || Number(get(store, "document_count") ?? 0) < 1;
-  $("deactivate").disabled = !(held && ["active", "deactivation_failed"].includes(life)) || hasActiveOperation("deactivation");
   $("deactivate").textContent = life === "deactivation_failed" ? "Retry deactivation" : "Commit generation fence";
-  $("release").disabled = !(held && fenced && !released);
-  $("load-proof").disabled = !state.runId;
-  $("copy-proof").disabled = !state.proofQuery;
   setText("hold-state", released ? "released" : held ? "held before commit" : "armed");
   setText("release-hint", fenced ? "Fence committed" : "Waiting for generation fence");
   setText("late-write-result", state.events.some((event) => event.event_type === "stale_generation_rejected") ? "Lakebase rejected expected generation 7; actual generation 8." : released ? "Late writer released; waiting for Lakebase verdict." : held ? "Document is held immediately before commit." : "Waiting for the held document and fence.");
@@ -200,12 +208,10 @@ async function loadPlatformReadiness() {
     const searchReady = Boolean(get(payload, "search_ready") ?? (payload.ready && get(payload, "details.search_backend") === "lakebase_hybrid"));
     const embeddingsReady = Boolean(get(payload, "embeddings_ready") ?? payload.ready);
     setReadiness("ready-lakebase", databaseReady); setReadiness("ready-search", searchReady); setReadiness("ready-embeddings", embeddingsReady); setReadiness("ready-temporal", temporalReady);
-    $("preflight").disabled = !(response.ok && payload.ready);
-    setText("preflight-status", response.ok && payload.ready ? "Platform ready. Inspect the stable folder." : "Preflight blocked until every dependency is ready.");
+    setText("preflight-status", response.ok && payload.ready ? "Platform ready. Inspect the stable folder." : "Some dependencies report unavailable. You can still inspect the folder and view the server response.");
   } catch {
     for (const id of ["ready-lakebase", "ready-search", "ready-embeddings", "ready-temporal"]) setReadiness(id, false);
-    $("preflight").disabled = true;
-    setText("preflight-status", "Platform readiness is unavailable.");
+    setText("preflight-status", "Platform readiness is unavailable. The inspect action remains available.");
   }
 }
 
@@ -213,7 +219,7 @@ async function pollPreflight() {
   if (!state.preflightWorkflowId) return;
   const payload = await api(`/api/preflight/${encodeURIComponent(state.preflightWorkflowId)}`);
   setText("preflight-status", payload.status === "completed" ? `Connected · ${payload.result?.files?.length ?? 0} files · ${payload.result?.folders_scanned ?? 0} folders` : `Temporal preflight: ${payload.status}`);
-  if (payload.status === "completed") { renderFiles(payload.result?.files ?? []); $("new-run").disabled = false; activateStep("sync"); }
+  if (payload.status === "completed") { renderFiles(payload.result?.files ?? []); activateStep("sync"); }
 }
 
 async function refresh() {
@@ -235,18 +241,23 @@ function renderOperations() {
   if (!container.children.length) container.textContent = "No operations yet.";
 }
 
-async function runAction(button, label, action) { clearError(); setBusy(button, true, label); try { await action(); } catch (error) { showError(error); } finally { setBusy(button, false); await refresh(); } }
+async function runAction(button, label, action) {
+  if (button.dataset.busy === "true") return;
+  clearError();
+  setBusy(button, true, label);
+  try { await action(); } catch (error) { showError(error); } finally { setBusy(button, false); await refresh(); }
+}
 
 $("preflight").addEventListener("click", () => runAction($("preflight"), "Inspecting…", async () => { const result = await api("/api/preflight", { method: "POST", headers: { "Idempotency-Key": idempotencyKey("preflight") } }); state.preflightWorkflowId = result.workflow_id; safeStorageSet("retrieval-demo-preflight-id", result.workflow_id); setText("preflight-status", "Temporal preflight started."); }));
 $("new-run").addEventListener("click", () => runAction($("new-run"), "Creating…", async () => { const run = await api("/api/demo/runs", { method: "POST", headers: { "Idempotency-Key": idempotencyKey("new-run") } }); state.runId = run.run_id; state.events = []; state.operations.clear(); safeStorageSet("retrieval-demo-run-id", run.run_id); activateStep("sync"); }));
-$("sync").addEventListener("click", () => runAction($("sync"), "Starting…", async () => { const operation = await api(`/api/demo/runs/${state.runId}/sync`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("sync") } }); state.operations.set(operation.operation_id, operation); }));
+$("sync").addEventListener("click", () => runAction($("sync"), "Starting…", async () => { const runId = requireRun(); const operation = await api(`/api/demo/runs/${runId}/sync`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("sync") } }); state.operations.set(operation.operation_id, operation); }));
 $("manager-end").addEventListener("click", () => runAction($("manager-end"), "Ending…", async () => { const workflowId = activeSyncIds()[0]; if (!workflowId) throw new Error("No active ingestion workflow to end."); await api(`/api/demo/runs/${state.runId}/workflows/end`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("end-workflow") }, body: JSON.stringify({ workflow_id: workflowId }) }); setText("manager-status", "Cancellation requested. Waiting for the workflow to close."); }));
-$("manager-increment").addEventListener("click", () => runAction($("manager-increment"), "Advancing…", async () => { const operation = await api(`/api/demo/runs/${state.runId}/deactivate`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("increment-generation") } }); state.operations.set(operation.operation_id, operation); setText("manager-status", "Generation fence submitted."); }));
-$("manager-scan").addEventListener("click", () => runAction($("manager-scan"), "Scanning…", async () => { const operation = await api(`/api/demo/runs/${state.runId}/sync`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("fresh-ingestion-scan") } }); state.operations.set(operation.operation_id, operation); setText("manager-status", "Fresh ingestion scan submitted."); }));
-$("ask").addEventListener("click", () => runAction($("ask"), "Retrieving…", async () => { const answer = await api(`/api/demo/runs/${state.runId}/ask`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("ask") }, body: JSON.stringify({ question: $("question").value }) }); renderAnswer(answer); activateStep("retrieve"); }));
-$("deactivate").addEventListener("click", () => runAction($("deactivate"), "Fencing…", async () => { const operation = await api(`/api/demo/runs/${state.runId}/deactivate`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("deactivate") } }); state.operations.set(operation.operation_id, operation); activateStep("deactivate"); }));
-$("release").addEventListener("click", () => runAction($("release"), "Releasing…", async () => { await api(`/api/demo/runs/${state.runId}/controls/release`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("release") } }); activateStep("reject"); }));
-$("load-proof").addEventListener("click", () => runAction($("load-proof"), "Loading…", async () => { const proof = await api(`/api/demo/runs/${state.runId}/proof`); state.proofQuery = proof.proof_query ?? null; $("copy-proof").disabled = !state.proofQuery; $("proof-result").textContent = JSON.stringify(proof, null, 2); activateStep("recap"); }));
+$("manager-increment").addEventListener("click", () => runAction($("manager-increment"), "Advancing…", async () => { const runId = requireRun(); const operation = await api(`/api/demo/runs/${runId}/deactivate`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("increment-generation") } }); state.operations.set(operation.operation_id, operation); setText("manager-status", "Generation fence submitted."); }));
+$("manager-scan").addEventListener("click", () => runAction($("manager-scan"), "Scanning…", async () => { const runId = requireRun(); const operation = await api(`/api/demo/runs/${runId}/sync`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("fresh-ingestion-scan") } }); state.operations.set(operation.operation_id, operation); setText("manager-status", "Fresh ingestion scan submitted."); }));
+$("ask").addEventListener("click", () => runAction($("ask"), "Retrieving…", async () => { const runId = requireRun(); const answer = await api(`/api/demo/runs/${runId}/ask`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("ask") }, body: JSON.stringify({ question: $("question").value }) }); renderAnswer(answer); activateStep("retrieve"); }));
+$("deactivate").addEventListener("click", () => runAction($("deactivate"), "Fencing…", async () => { const runId = requireRun(); const operation = await api(`/api/demo/runs/${runId}/deactivate`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("deactivate") } }); state.operations.set(operation.operation_id, operation); activateStep("deactivate"); }));
+$("release").addEventListener("click", () => runAction($("release"), "Releasing…", async () => { const runId = requireRun(); await api(`/api/demo/runs/${runId}/controls/release`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("release") } }); activateStep("reject"); }));
+$("load-proof").addEventListener("click", () => runAction($("load-proof"), "Loading…", async () => { const runId = requireRun(); const proof = await api(`/api/demo/runs/${runId}/proof`); state.proofQuery = proof.proof_query ?? null; $("proof-result").textContent = JSON.stringify(proof, null, 2); activateStep("recap"); }));
 $("copy-proof").addEventListener("click", () => runAction($("copy-proof"), "Copying…", async () => { if (!state.proofQuery) throw new Error("Load Lakebase proof first."); await navigator.clipboard.writeText(state.proofQuery); }));
 
 for (const item of document.querySelectorAll(".story-rail li")) item.addEventListener("click", () => { activateStep(item.dataset.step); $(`${item.dataset.step}-card`)?.scrollIntoView({ behavior: "smooth", block: "center" }); });

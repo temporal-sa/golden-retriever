@@ -26,7 +26,9 @@ with workflow.unsafe.imports_passed_through():
         SyncProgress,
         SyncResult,
     )
-    from retrieval.temporal.workflows._policies import provider_activity_options
+    from retrieval.temporal.workflows._policies import (
+        provider_resource_page_activity_options,
+    )
 
 
 class _QuotaRetryRollover(Exception):
@@ -107,7 +109,7 @@ class ResourcePagesWorkflow(QuotaWaiterMixin):
                         quota_scope=command.quota_scope,
                     ),
                     result_type=ResourcePageManifest,
-                    **provider_activity_options(
+                    **provider_resource_page_activity_options(
                         task_queue=command.provider_task_queue,
                         work_class=command.work_class,
                         quota_scope=command.quota_scope,

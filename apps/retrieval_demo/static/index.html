@@ -69,7 +69,7 @@
               <div><small>Embedding endpoint</small><strong id="ready-embeddings">checking</strong></div>
               <div><small>Temporal pollers</small><strong id="ready-temporal">checking</strong></div>
             </div>
-            <button id="preflight" class="primary-button" type="button" disabled>Inspect Drive folder</button>
+            <button id="preflight" class="primary-button" type="button">Inspect Drive folder</button>
             <div id="preflight-status" class="status-line">Checking platform dependencies.</div>
             <ul id="source-files" class="file-list"><li>No source files loaded yet.</li></ul>
           </div>
@@ -85,8 +85,8 @@
               and traversal checkpoints live in Lakebase, so any worker can continue.
             </p>
             <div class="button-row">
-              <button id="new-run" class="secondary-button" type="button" disabled>Create fresh run</button>
-              <button id="sync" class="primary-button" type="button" disabled>Start sync</button>
+              <button id="new-run" class="secondary-button" type="button">Create fresh run</button>
+              <button id="sync" class="primary-button" type="button">Start sync</button>
             </div>
             <div class="signal-grid">
               <div><small>Provider</small><strong id="quota-state">waiting</strong></div>
@@ -108,7 +108,7 @@
             </p>
             <label for="question">Question</label>
             <textarea id="question" rows="3">What should the account team prioritize before Northstar's renewal?</textarea>
-            <button id="ask" class="primary-button" type="button" disabled>Retrieve evidence</button>
+            <button id="ask" class="primary-button" type="button">Retrieve evidence</button>
             <div id="answer-result" class="answer-result">No answer yet.</div>
             <ol id="citations" class="citations"></ol>
           </div>
@@ -123,7 +123,7 @@
               Deactivation commits generation 8 first. Every older writer immediately becomes
               stale, regardless of which Temporal Activity is still finishing.
             </p>
-            <button id="deactivate" class="danger-button" type="button" disabled>Commit generation fence</button>
+            <button id="deactivate" class="danger-button" type="button">Commit generation fence</button>
             <div class="generation-compare">
               <div><small>Late writer expects</small><strong>generation 7</strong></div>
               <span>→</span>
@@ -141,9 +141,9 @@
               The Activity resumes and reaches the database transaction. Lakebase atomically sees
               expected generation 7, actual generation 8, and rejects the write.
             </p>
-            <button id="release" class="warning-button" type="button" disabled>Release late writer</button>
+            <button id="release" class="warning-button" type="button">Release late writer</button>
             <div id="late-write-result" class="status-line">Waiting for the held document and fence.</div>
-            <button id="hold" class="visually-hidden" type="button" disabled>Arm hold</button>
+            <button id="hold" class="visually-hidden" type="button">Arm hold</button>
           </div>
         </article>
 
@@ -158,8 +158,8 @@
               <div><b>Your app</b><span>commands, reads, and a few explicit invariants</span></div>
             </div>
             <div class="button-row">
-              <button id="load-proof" class="secondary-button" type="button" disabled>Load Lakebase proof</button>
-              <button id="copy-proof" class="secondary-button" type="button" disabled>Copy proof query</button>
+              <button id="load-proof" class="secondary-button" type="button">Load Lakebase proof</button>
+              <button id="copy-proof" class="secondary-button" type="button">Copy proof query</button>
             </div>
             <pre id="proof-result">Proof becomes available after a run is created.</pre>
           </div>
@@ -183,9 +183,9 @@
             <div><dt>Active ingestion</dt><dd id="manager-active-ingestion">0</dd></div>
           </dl>
           <div class="workflow-manager-actions">
-            <button id="manager-end" class="danger-button" type="button" disabled>End active workflow</button>
-            <button id="manager-increment" class="warning-button" type="button" disabled>Increment generation</button>
-            <button id="manager-scan" class="primary-button" type="button" disabled>Start fresh ingestion scan</button>
+            <button id="manager-end" class="danger-button" type="button">End active workflow</button>
+            <button id="manager-increment" class="warning-button" type="button">Increment generation</button>
+            <button id="manager-scan" class="primary-button" type="button">Start fresh ingestion scan</button>
           </div>
           <p id="manager-status" class="status-line">Create a run to enable workflow controls.</p>
         </section>

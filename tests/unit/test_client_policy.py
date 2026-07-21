@@ -11,7 +11,10 @@ from retrieval.temporal import client as client_module
 from retrieval.temporal.client import RetrievalClient
 from retrieval.temporal.models.operations import SyncCommand
 from retrieval.temporal.runtime_config import TemporalRuntimeConfig
-from retrieval.temporal.workflows._policies import ingestion_activity_options
+from retrieval.temporal.workflows._policies import (
+    ingestion_activity_options,
+    provider_resource_page_activity_options,
+)
 
 
 @pytest.mark.asyncio
@@ -73,3 +76,15 @@ def test_from_runtime_enables_fairness_only_after_both_gates(
 
 def test_ingestion_activity_has_heartbeat_timeout() -> None:
     assert ingestion_activity_options()["heartbeat_timeout"] == timedelta(seconds=45)
+
+
+def test_provider_resource_page_activity_has_five_minute_timeout() -> None:
+    options = provider_resource_page_activity_options(
+        task_queue="provider",
+        work_class=cast(Any, SimpleNamespace()),
+        quota_scope=None,
+        priority_fairness_enabled=False,
+    )
+
+    assert options["start_to_close_timeout"] == timedelta(minutes=5)
+    assert options["schedule_to_close_timeout"] == timedelta(minutes=30)
