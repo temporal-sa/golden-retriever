@@ -164,6 +164,31 @@
             <pre id="proof-result">Proof becomes available after a run is created.</pre>
           </div>
         </article>
+
+        <section id="workflow-manager" class="workflow-manager" aria-labelledby="workflow-manager-title">
+          <div class="workflow-manager-heading">
+            <div>
+              <p class="eyebrow">WORKFLOW MANAGER</p>
+              <h2 id="workflow-manager-title">Operate the current ingestion lifecycle.</h2>
+              <p>
+                Cancel active ingestion, advance the authoritative generation through the safe
+                deactivation path, or submit a new full-folder scan.
+              </p>
+            </div>
+            <span id="manager-state" class="manager-state">No run selected</span>
+          </div>
+          <dl class="workflow-manager-stats">
+            <div><dt>Controller</dt><dd id="manager-controller">not started</dd></div>
+            <div><dt>Generation</dt><dd id="manager-generation">—</dd></div>
+            <div><dt>Active ingestion</dt><dd id="manager-active-ingestion">0</dd></div>
+          </dl>
+          <div class="workflow-manager-actions">
+            <button id="manager-end" class="danger-button" type="button" disabled>End active workflow</button>
+            <button id="manager-increment" class="warning-button" type="button" disabled>Increment generation</button>
+            <button id="manager-scan" class="primary-button" type="button" disabled>Start fresh ingestion scan</button>
+          </div>
+          <p id="manager-status" class="status-line">Create a run to enable workflow controls.</p>
+        </section>
       </section>
     </main>
 

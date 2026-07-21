@@ -93,6 +93,7 @@ The default URL is <http://127.0.0.1:8000>. `DATABRICKS_APP_PORT` overrides the 
 | `GET /api/demo/runs/{run_id}/events` | Durable event evidence |
 | `GET /api/demo/runs/{run_id}/search` | Current-generation Lakebase hybrid search |
 | `POST /api/demo/runs/{run_id}/sync` | Submit asynchronous sync |
+| `POST /api/demo/runs/{run_id}/workflows/end` | Cancel an active ingestion workflow through its controller |
 | `POST /api/demo/runs/{run_id}/deactivate` | Submit asynchronous deactivation |
 | `POST /api/demo/runs/{run_id}/controls/release` | Release the held writer after the fence |
 | `POST /api/demo/runs/{run_id}/ask` | Return a dynamic, cited answer |
@@ -114,8 +115,7 @@ Run bundle commands from this directory. Required variables are:
 | `demo_held_document_key` | `gdrive:<stable-file-id>` |
 | `temporal_secret_scope` | scope containing address, namespace, and API key |
 
-Optional presentation variables are `google_drive_folder_url`, `temporal_web_base_url`, and
-`lakebase_tooling_url`.
+Optional presentation variables are `google_drive_folder_url` and `temporal_web_base_url`.
 
 ```bash
 databricks bundle validate --strict --profile <PROFILE> -t dev \

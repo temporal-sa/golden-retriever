@@ -17,7 +17,7 @@ function idempotencyKey(action) { return `retrieval-demo:${action}:${window.cryp
 function setText(id, value) { const node = $(id); if (node) node.textContent = value ?? "—"; }
 function get(object, ...paths) { for (const path of paths) { const found = path.split(".").reduce((current, key) => current?.[key], object); if (found !== undefined && found !== null) return found; } return undefined; }
 function safeHttpUrl(value) { try { const parsed = new URL(value); return ["http:", "https:"].includes(parsed.protocol) && !parsed.username && !parsed.password ? parsed.href : null; } catch { return null; } }
-function hasActiveOperation(type) { return [...state.operations.values()].some((operation) => operation.operation_type === type && !["completed", "failed", "canceled"].includes(String(operation.status).toLowerCase())); }
+function hasActiveOperation(type) { return [...state.operations.values()].some((operation) => operation.operation_type === type && !["completed", "failed", "canceled", "rejected"].includes(String(operation.status).toLowerCase())); }
 
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { Accept: "application/json", ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers ?? {}) } });
@@ -34,6 +34,28 @@ function database(snapshot) { return get(snapshot, "database", "store", "store_s
 function controls(snapshot) { return get(snapshot, "controls", "demo_controls") ?? {}; }
 function lifecycle(snapshot = state.snapshot) { return String(get(database(snapshot), "lifecycle_state", "state") ?? "unknown").toLowerCase(); }
 function generation(snapshot = state.snapshot) { return Number(get(database(snapshot), "lifecycle_generation", "generation") ?? -1); }
+function activeSyncIds(snapshot = state.snapshot) { const ids = get(snapshot, "controller.active_sync_ids") ?? []; return Array.isArray(ids) ? ids.filter((id) => typeof id === "string" && id) : []; }
+
+function renderWorkflowManager(snapshot) {
+  const controller = snapshot?.controller ?? {};
+  const syncIds = activeSyncIds(snapshot);
+  const life = lifecycle(snapshot);
+  const gen = generation(snapshot);
+  const hasRun = Boolean(state.runId);
+  const deactivationActive = Boolean(controller.active_deactivation_id) || hasActiveOperation("deactivation");
+  setText("manager-controller", controller.controller_workflow_id ?? "not started");
+  setText("manager-generation", gen >= 0 ? gen : "—");
+  setText("manager-active-ingestion", syncIds.length);
+  setText("manager-state", hasRun ? life : "No run selected");
+  $("manager-end").disabled = !hasRun || syncIds.length === 0;
+  $("manager-increment").disabled = !hasRun || deactivationActive || !["active", "syncing", "deactivation_failed"].includes(life);
+  $("manager-scan").disabled = !hasRun || life !== "active" || syncIds.length > 0 || deactivationActive;
+  if (!hasRun) setText("manager-status", "Create a run to enable workflow controls.");
+  else if (deactivationActive) setText("manager-status", "Generation advancement is in progress.");
+  else if (syncIds.length) setText("manager-status", `${syncIds.length} ingestion workflow${syncIds.length === 1 ? " is" : "s are"} active.`);
+  else if (life === "active") setText("manager-status", "Ready for a fresh ingestion scan.");
+  else setText("manager-status", `Workflow controls are limited while the store is ${life}.`);
+}
 
 function activateStep(name) {
   document.querySelectorAll(".story-rail li").forEach((item) => item.classList.toggle("active", item.dataset.step === name));
@@ -91,6 +113,7 @@ function renderSnapshot(snapshot) {
   setText("late-write-result", state.events.some((event) => event.event_type === "stale_generation_rejected") ? "Lakebase rejected expected generation 7; actual generation 8." : released ? "Late writer released; waiting for Lakebase verdict." : held ? "Document is held immediately before commit." : "Waiting for the held document and fence.");
   setText("last-updated", `Updated ${new Date().toLocaleTimeString()}`);
   renderWorkflows(snapshot);
+  renderWorkflowManager(snapshot);
   activateStep(inferredStep());
 }
 
@@ -217,6 +240,9 @@ async function runAction(button, label, action) { clearError(); setBusy(button, 
 $("preflight").addEventListener("click", () => runAction($("preflight"), "Inspecting…", async () => { const result = await api("/api/preflight", { method: "POST", headers: { "Idempotency-Key": idempotencyKey("preflight") } }); state.preflightWorkflowId = result.workflow_id; safeStorageSet("retrieval-demo-preflight-id", result.workflow_id); setText("preflight-status", "Temporal preflight started."); }));
 $("new-run").addEventListener("click", () => runAction($("new-run"), "Creating…", async () => { const run = await api("/api/demo/runs", { method: "POST", headers: { "Idempotency-Key": idempotencyKey("new-run") } }); state.runId = run.run_id; state.events = []; state.operations.clear(); safeStorageSet("retrieval-demo-run-id", run.run_id); activateStep("sync"); }));
 $("sync").addEventListener("click", () => runAction($("sync"), "Starting…", async () => { const operation = await api(`/api/demo/runs/${state.runId}/sync`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("sync") } }); state.operations.set(operation.operation_id, operation); }));
+$("manager-end").addEventListener("click", () => runAction($("manager-end"), "Ending…", async () => { const workflowId = activeSyncIds()[0]; if (!workflowId) throw new Error("No active ingestion workflow to end."); await api(`/api/demo/runs/${state.runId}/workflows/end`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("end-workflow") }, body: JSON.stringify({ workflow_id: workflowId }) }); setText("manager-status", "Cancellation requested. Waiting for the workflow to close."); }));
+$("manager-increment").addEventListener("click", () => runAction($("manager-increment"), "Advancing…", async () => { const operation = await api(`/api/demo/runs/${state.runId}/deactivate`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("increment-generation") } }); state.operations.set(operation.operation_id, operation); setText("manager-status", "Generation fence submitted."); }));
+$("manager-scan").addEventListener("click", () => runAction($("manager-scan"), "Scanning…", async () => { const operation = await api(`/api/demo/runs/${state.runId}/sync`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("fresh-ingestion-scan") } }); state.operations.set(operation.operation_id, operation); setText("manager-status", "Fresh ingestion scan submitted."); }));
 $("ask").addEventListener("click", () => runAction($("ask"), "Retrieving…", async () => { const answer = await api(`/api/demo/runs/${state.runId}/ask`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("ask") }, body: JSON.stringify({ question: $("question").value }) }); renderAnswer(answer); activateStep("retrieve"); }));
 $("deactivate").addEventListener("click", () => runAction($("deactivate"), "Fencing…", async () => { const operation = await api(`/api/demo/runs/${state.runId}/deactivate`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("deactivate") } }); state.operations.set(operation.operation_id, operation); activateStep("deactivate"); }));
 $("release").addEventListener("click", () => runAction($("release"), "Releasing…", async () => { await api(`/api/demo/runs/${state.runId}/controls/release`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey("release") } }); activateStep("reject"); }));

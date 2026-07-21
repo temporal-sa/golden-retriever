@@ -24,6 +24,8 @@ from retrieval.temporal.common.ids import (
 )
 from retrieval.temporal.models.lifecycle import StoreControllerSnapshot, StoreLifecycleState
 from retrieval.temporal.models.operations import (
+    CancellationAccepted,
+    CancelSyncCommand,
     CommandResult,
     OperationAccepted,
     OperationStatus,
@@ -41,6 +43,7 @@ class CapturingGateway:
         terminal_result: ResultStatus = ResultStatus.SUCCEEDED,
     ) -> None:
         self.commands: list[SyncCommand] = []
+        self.cancel_commands: list[CancelSyncCommand] = []
         self.started = False
         self.terminal_status = terminal_status
         self.terminal_result = terminal_result
@@ -62,6 +65,15 @@ class CapturingGateway:
             workflow_id="store-sync/workflow",
             operation_type=OperationType.SYNC,
             lifecycle_generation=command.expected_generation,
+        )
+
+    async def cancel_sync(self, command: CancelSyncCommand) -> CancellationAccepted:
+        self.cancel_commands.append(command)
+        return CancellationAccepted(
+            command_id=command.command_id,
+            operation_id=command.operation_id,
+            accepted=True,
+            duplicate=len(self.cancel_commands) > 1,
         )
 
     async def start_deactivation(self, command):
@@ -134,6 +146,44 @@ async def test_preflight_is_stably_identified_and_persisted_in_demo_state() -> N
         assert completed["status"] == "completed"
         assert completed["result"]["files"][0]["name"] == "Roadmap"
         assert await state.get_preflight(str(started["workflow_id"])) == completed
+    finally:
+        await service.aclose()
+
+
+async def test_workflow_manager_cancels_active_ingestion_idempotently() -> None:
+    scenario = load_northstar_scenario()
+    repository = InMemoryRetrievalRepository()
+    state = InMemoryDemoStateStore()
+    gateway = CapturingGateway()
+    service = DemoService(
+        config=DemoConfig(enabled=True),
+        scenario=scenario,
+        state_store=state,
+        repository=repository,
+        search_adapter=InMemoryTextSearch(repository),
+        command_gateway=gateway,
+    )
+    await service.start()
+    try:
+        run = await service.create_run(idempotency_key="workflow-manager-run")
+        sync = await service.start_sync(run.run_id, idempotency_key="workflow-manager-sync")
+
+        ended = await service.end_workflow(
+            run.run_id,
+            sync.workflow_id or "",
+            idempotency_key="workflow-manager-end",
+        )
+        replay = await service.end_workflow(
+            run.run_id,
+            sync.workflow_id or "",
+            idempotency_key="workflow-manager-end",
+        )
+
+        assert ended == replay
+        assert ended["status"] == "cancel_requested"
+        assert ended["workflow_id"] == "store-sync/workflow"
+        assert len(gateway.cancel_commands) == 1
+        assert gateway.cancel_commands[0].operation_id == "store-sync/workflow"
     finally:
         await service.aclose()
 

@@ -167,6 +167,21 @@ class FakeDemoService:
     async def start_sync(self, run_id: str, *, idempotency_key: str) -> object:
         return await self._operation(run_id, "sync", idempotency_key)
 
+    async def end_workflow(
+        self,
+        run_id: str,
+        workflow_id: str,
+        *,
+        idempotency_key: str,
+    ) -> object:
+        self._assert_run(run_id)
+        return self._idempotent(
+            idempotency_key,
+            "end_workflow",
+            {"run_id": run_id, "workflow_id": workflow_id},
+            {"workflow_id": workflow_id, "status": "cancel_requested", "accepted": True},
+        )
+
     async def start_deactivation(self, run_id: str, *, idempotency_key: str) -> object:
         return await self._operation(run_id, "deactivate", idempotency_key)
 
@@ -296,11 +311,26 @@ async def test_lifespan_health_and_static_ui() -> None:
         assert "Retrieval that stays correct" in page.text
         assert "Reject late write" in page.text
         assert "Workflow links" in page.text
+        assert "WORKFLOW MANAGER" in page.text
+        assert "Start fresh ingestion scan" in page.text
         assert "Retrieve evidence" in page.text
         assert "Release the old writer" in page.text
         script = await client.get("/app.js")
         assert script.status_code == 200
         assert "Retry deactivation" in script.text
+        assert "/workflows/end" in script.text
+
+        ended = await client.post(
+            f"/api/demo/runs/{service.run_id}/workflows/end",
+            headers={"Idempotency-Key": "end-workflow-1"},
+            json={"workflow_id": "store-sync/northstar/7/one"},
+        )
+        assert ended.status_code == 202
+        assert ended.json() == {
+            "workflow_id": "store-sync/northstar/7/one",
+            "status": "cancel_requested",
+            "accepted": True,
+        }
 
     assert service.closed
 

@@ -21,9 +21,6 @@ variables:
   temporal_web_base_url:
     description: Temporal UI base URL used to create workflow deep links
     default: ""
-  lakebase_tooling_url:
-    description: Databricks Lakebase tooling URL shown during the demo
-    default: ""
   temporal_secret_scope:
     description: Databricks secret scope containing the Temporal connection values
   temporal_address_secret_key:
@@ -109,8 +106,6 @@ resources:
             value: ${var.google_drive_folder_url}
           - name: TEMPORAL_WEB_BASE_URL
             value: ${var.temporal_web_base_url}
-          - name: LAKEBASE_TOOLING_URL
-            value: ${var.lakebase_tooling_url}
           - name: LAKEBASE_POOL_MIN_SIZE
             value: "1"
           - name: LAKEBASE_POOL_MAX_SIZE

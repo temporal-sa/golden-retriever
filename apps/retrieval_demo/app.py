@@ -8,6 +8,7 @@ through :func:`create_app`.
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -29,12 +30,19 @@ from retrieval.environment import inject_environment
 
 STATIC_DIRECTORY = Path(__file__).with_name("static")
 MAX_IDEMPOTENCY_KEY_LENGTH = 200
+LOGGER = logging.getLogger(__name__)
 
 
 class AskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     question: str = Field(min_length=3, max_length=500)
+
+
+class EndWorkflowRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str = Field(min_length=1, max_length=512)
 
 
 @runtime_checkable
@@ -62,6 +70,14 @@ class DemoApplicationService(Protocol):
     async def get_snapshot(self, run_id: str) -> object: ...
 
     async def start_sync(self, run_id: str, *, idempotency_key: str) -> object: ...
+
+    async def end_workflow(
+        self,
+        run_id: str,
+        workflow_id: str,
+        *,
+        idempotency_key: str,
+    ) -> object: ...
 
     async def start_deactivation(self, run_id: str, *, idempotency_key: str) -> object: ...
 
@@ -130,6 +146,19 @@ class LazyRuntimeService:
 
     async def start_sync(self, run_id: str, *, idempotency_key: str) -> object:
         return await self._service().start_sync(run_id, idempotency_key=idempotency_key)
+
+    async def end_workflow(
+        self,
+        run_id: str,
+        workflow_id: str,
+        *,
+        idempotency_key: str,
+    ) -> object:
+        return await self._service().end_workflow(
+            run_id,
+            workflow_id,
+            idempotency_key=idempotency_key,
+        )
 
     async def start_deactivation(self, run_id: str, *, idempotency_key: str) -> object:
         return await self._service().start_deactivation(
@@ -408,6 +437,10 @@ def create_app(service: DemoApplicationService | None = None) -> FastAPI:
             # Starlette's catch-all exception handler deliberately re-raises after writing the
             # response. Catch at middleware level so expected service-domain conflicts produce a
             # normal HTTP response in both production and TestClient.
+            LOGGER.exception(
+                "Unhandled demo request failure",
+                extra={"request_method": request.method, "request_path": request.url.path},
+            )
             return _error_response(exc)
 
     @application.get("/healthz", tags=["health"])
@@ -534,6 +567,24 @@ def create_app(service: DemoApplicationService | None = None) -> FastAPI:
     ) -> object:
         return _to_json(
             await application_service.start_sync(str(run_id), idempotency_key=idempotency_key)
+        )
+
+    @application.post(
+        "/api/demo/runs/{run_id}/workflows/end",
+        status_code=status.HTTP_202_ACCEPTED,
+        tags=["demo"],
+    )
+    async def end_workflow(
+        run_id: UUID,
+        request: EndWorkflowRequest,
+        idempotency_key: str = Depends(_required_idempotency_key),
+    ) -> object:
+        return _to_json(
+            await application_service.end_workflow(
+                str(run_id),
+                _operation_id(request.workflow_id),
+                idempotency_key=idempotency_key,
+            )
         )
 
     @application.post(

@@ -13,9 +13,12 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
-from retrieval.temporal.activities.provider_api import ProviderPreflightRequest
+from retrieval.temporal.activities.provider_api import (
+    ProviderPreflightRequest,
+    ProviderPreflightResult,
+)
 from retrieval.temporal.activities.repositories import (
     InMemoryRetrievalRepository,
     RetrievalRepository,
@@ -27,6 +30,7 @@ from retrieval.temporal.common.ids import (
 )
 from retrieval.temporal.models.lifecycle import StoreLifecycleState
 from retrieval.temporal.models.operations import (
+    CancelSyncCommand,
     CommandResult,
     OperationAccepted,
     OperationStatus,
@@ -124,6 +128,8 @@ class DemoCommandGateway(Protocol):
 
     async def request_sync(self, command: SyncCommand) -> OperationAccepted: ...
 
+    async def cancel_sync(self, command: CancelSyncCommand) -> Any: ...
+
     async def start_deactivation(self, command: StartDeactivationCommand) -> OperationAccepted: ...
 
     async def get_status(self, store_key: str) -> Any: ...
@@ -171,29 +177,71 @@ class LazyTemporalCommandGateway:
             return False
         try:
             await self._raw_client.service_client.check_health()
-            from temporalio.api.enums.v1 import TaskQueueType
-            from temporalio.api.taskqueue.v1 import TaskQueue
-            from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
-
-            queue_checks = (
-                (self._runtime.retrieval_task_queue, "TASK_QUEUE_TYPE_WORKFLOW"),
-                (self._runtime.retrieval_task_queue, "TASK_QUEUE_TYPE_ACTIVITY"),
-                (self._runtime.provider_task_queue, "TASK_QUEUE_TYPE_ACTIVITY"),
+            from temporalio.api.enums.v1 import WorkerStatus
+            from temporalio.api.workflowservice.v1 import (
+                DescribeWorkerRequest,
+                ListWorkersRequest,
             )
-            for task_queue, queue_type in queue_checks:
-                response = await self._raw_client.workflow_service.describe_task_queue(
-                    DescribeTaskQueueRequest(
+
+            required_pollers = {
+                self._runtime.retrieval_task_queue: {"workflow", "activity"},
+                self._runtime.provider_task_queue: {"activity"},
+            }
+            if self._runtime.retrieval_task_queue == self._runtime.provider_task_queue:
+                required_pollers[self._runtime.retrieval_task_queue] = {
+                    "workflow",
+                    "activity",
+                }
+            queue_query = " OR ".join(
+                f"TaskQueue={json.dumps(task_queue)}" for task_queue in sorted(required_pollers)
+            )
+            next_page_token = b""
+            seen_page_tokens: set[bytes] = set()
+            seen_workers: set[str] = set()
+            while True:
+                response = await self._raw_client.workflow_service.list_workers(
+                    ListWorkersRequest(
                         namespace=self._runtime.namespace,
-                        task_queue=TaskQueue(name=task_queue),
-                        task_queue_type=TaskQueueType.Value(queue_type),
-                        report_pollers=True,
+                        page_size=100,
+                        next_page_token=next_page_token,
+                        query=queue_query,
                     )
                 )
-                if not response.pollers:
+                for worker in response.workers:
+                    worker_key = worker.worker_instance_key
+                    if (
+                        worker.status != WorkerStatus.WORKER_STATUS_RUNNING
+                        or worker.task_queue not in required_pollers
+                        or not worker_key
+                        or worker_key in seen_workers
+                    ):
+                        continue
+                    seen_workers.add(worker_key)
+                    detail = await self._raw_client.workflow_service.describe_worker(
+                        DescribeWorkerRequest(
+                            namespace=self._runtime.namespace,
+                            worker_instance_key=worker_key,
+                        )
+                    )
+                    heartbeat = detail.worker_info.worker_heartbeat
+                    if (
+                        heartbeat.status != WorkerStatus.WORKER_STATUS_RUNNING
+                        or heartbeat.task_queue != worker.task_queue
+                    ):
+                        continue
+                    queue_requirements = required_pollers[heartbeat.task_queue]
+                    if heartbeat.workflow_poller_info.current_pollers > 0:
+                        queue_requirements.discard("workflow")
+                    if heartbeat.activity_poller_info.current_pollers > 0:
+                        queue_requirements.discard("activity")
+                if all(not pollers for pollers in required_pollers.values()):
+                    return True
+                next_page_token = bytes(response.next_page_token)
+                if not next_page_token or next_page_token in seen_page_tokens:
                     return False
+                seen_page_tokens.add(next_page_token)
         except Exception:
             return False
-        return True
 
     async def aclose(self) -> None:
         self._client = None
@@ -201,6 +249,9 @@ class LazyTemporalCommandGateway:
 
     async def request_sync(self, command: SyncCommand) -> OperationAccepted:
         return await self._require().request_sync(command)
+
+    async def cancel_sync(self, command: CancelSyncCommand) -> Any:
+        return await self._require().cancel_sync(command)
 
     async def start_deactivation(self, command: StartDeactivationCommand) -> OperationAccepted:
         return await self._require().start_deactivation(command)
@@ -218,8 +269,6 @@ class LazyTemporalCommandGateway:
     async def start_preflight(self, request: ProviderPreflightRequest) -> str:
         if self._raw_client is None:
             raise DemoUnavailableError("Temporal client is not connected")
-        from temporalio.client import WorkflowAlreadyStartedError
-
         from retrieval.temporal.workflows.provider_preflight import ProviderPreflightWorkflow
 
         workflow_id = f"retrieval-preflight-{request.request_id}"
@@ -238,7 +287,10 @@ class LazyTemporalCommandGateway:
     async def get_preflight(self, workflow_id: str) -> Mapping[str, Any]:
         if self._raw_client is None:
             raise DemoUnavailableError("Temporal client is not connected")
-        handle = self._raw_client.get_workflow_handle(workflow_id)
+        handle = self._raw_client.get_workflow_handle(
+            workflow_id,
+            result_type=ProviderPreflightResult,
+        )
         description = await handle.describe()
         status = description.status.name.lower()
         payload: dict[str, Any] = {"workflow_id": workflow_id, "status": status}
@@ -524,6 +576,65 @@ class DemoService:
             idempotency_key=idempotency_key,
             operation_type=DemoOperationType.DEACTIVATION,
         )
+
+    async def end_workflow(
+        self,
+        run_id: str,
+        workflow_id: str,
+        *,
+        idempotency_key: str,
+    ) -> Mapping[str, Any]:
+        """Cancel one active ingestion workflow through its durable controller."""
+
+        self._require_started()
+        if self._commands is None:
+            raise DemoUnavailableError("Temporal command gateway is not configured")
+        normalized_workflow_id = workflow_id.strip()
+        if not normalized_workflow_id or len(normalized_workflow_id) > 512:
+            raise ValueError("workflow ID must contain between 1 and 512 characters")
+        run = await self._state_store.get_run(run_id)
+        scope = f"demo:runs:{run_id}:workflows:end"
+        request_hash = _payload_hash({"workflow_id": normalized_workflow_id})
+        key_hash = _idempotency_hash(idempotency_key)
+        existing = await self._checked_receipt(scope, key_hash, request_hash)
+        if existing is not None:
+            return dict(existing.response)
+
+        deterministic = uuid.uuid5(
+            _OPERATION_NAMESPACE,
+            f"{scope}:{key_hash}:{normalized_workflow_id}",
+        )
+        try:
+            accepted = await self._commands.cancel_sync(
+                CancelSyncCommand(
+                    command_id=f"demo-command-{deterministic}",
+                    store_key=run.store_key,
+                    operation_id=normalized_workflow_id,
+                    reason="ended from the demo workflow manager",
+                    requested_at=datetime.now(UTC),
+                )
+            )
+        except Exception as exc:
+            raise DemoUnavailableError("Temporal workflow cancellation failed") from exc
+        if not accepted.accepted:
+            raise DemoConflictError(accepted.reason or "ingestion workflow is not active")
+
+        response = {
+            "workflow_id": normalized_workflow_id,
+            "status": "cancel_requested",
+            "accepted": True,
+            "duplicate": accepted.duplicate,
+        }
+        receipt = await self._state_store.put_idempotency_receipt(
+            ApiIdempotencyReceipt(
+                scope=scope,
+                idempotency_key_hash=key_hash,
+                request_hash=request_hash,
+                status_code=202,
+                response=response,
+            )
+        )
+        return dict(receipt.response)
 
     async def hold_late_document(self, run_id: str, *, idempotency_key: str) -> DemoControls:
         return await self._mutate_control(run_id, idempotency_key, release=False)
