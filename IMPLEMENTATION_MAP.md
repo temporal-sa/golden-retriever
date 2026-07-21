@@ -263,7 +263,7 @@ connection. `lakebase_hybrid` is reserved but not implemented; selecting it fail
 |---|---|---|
 | `RETRIEVAL_DEMO_MODE` | `false` | Enable demo adapters and endpoints |
 | `RETRIEVAL_DEMO_SCENARIO` | `northstar-v1` | Packaged scenario ID |
-| `RETRIEVAL_DEMO_HOLD_TIMEOUT_SECONDS` | `30` | Maximum pre-commit hold |
+| `RETRIEVAL_DEMO_HOLD_TIMEOUT_SECONDS` | `300` | Maximum pre-commit hold |
 | `RETRIEVAL_DEMO_CONTROL_POLL_SECONDS` | `0.25` | Cross-process control poll interval |
 | `RETRIEVAL_DEMO_STORE_KEY_PREFIX` | `northstar` | Required seed-function prefix |
 | `DATABRICKS_APP_PORT` | `8000` locally | App port; host is always `0.0.0.0` |

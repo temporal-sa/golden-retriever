@@ -50,7 +50,7 @@ class DemoConfig:
 
     enabled: bool = False
     scenario_id: str = "northstar-v1"
-    hold_timeout_seconds: float = 30.0
+    hold_timeout_seconds: float = 300.0
     control_poll_seconds: float = 0.25
     store_key_prefix: str = "northstar"
 
@@ -64,10 +64,10 @@ class DemoConfig:
         if (
             not math.isfinite(self.hold_timeout_seconds)
             or self.hold_timeout_seconds <= 0
-            or self.hold_timeout_seconds > 30
+            or self.hold_timeout_seconds > 300
         ):
             raise DemoConfigurationError(
-                "hold_timeout_seconds must be greater than zero and at most 30 seconds"
+                "hold_timeout_seconds must be greater than zero and at most 300 seconds"
             )
         if not math.isfinite(self.control_poll_seconds) or self.control_poll_seconds <= 0:
             raise DemoConfigurationError("control_poll_seconds must be greater than zero")

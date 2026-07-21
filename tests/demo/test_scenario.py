@@ -16,8 +16,18 @@ def test_demo_mode_is_off_by_default_and_requires_explicit_opt_in() -> None:
     config = DemoConfig.from_env({})
 
     assert config.enabled is False
+    assert config.hold_timeout_seconds == 300
     with pytest.raises(DemoModeDisabledError):
         config.require_enabled()
+
+
+def test_demo_hold_timeout_is_capped_at_five_minutes() -> None:
+    assert (
+        DemoConfig.from_env({"RETRIEVAL_DEMO_HOLD_TIMEOUT_SECONDS": "300"}).hold_timeout_seconds
+        == 300
+    )
+    with pytest.raises(DemoConfigurationError, match="at most 300 seconds"):
+        DemoConfig.from_env({"RETRIEVAL_DEMO_HOLD_TIMEOUT_SECONDS": "301"})
 
 
 @pytest.mark.parametrize(

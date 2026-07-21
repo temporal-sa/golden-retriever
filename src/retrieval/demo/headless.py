@@ -47,7 +47,7 @@ async def run_headless_story() -> HeadlessStoryResult:
     """Run the deterministic data-plane story without Temporal, Lakebase, or network access."""
 
     scenario = load_northstar_scenario()
-    config = DemoConfig(enabled=True, hold_timeout_seconds=30, control_poll_seconds=0.01)
+    config = DemoConfig(enabled=True, hold_timeout_seconds=300, control_poll_seconds=0.01)
     state_store = InMemoryDemoStateStore()
     repository = InMemoryRetrievalRepository()
     service = DemoService(
