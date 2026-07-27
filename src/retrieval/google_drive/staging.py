@@ -58,6 +58,9 @@ class GoogleDriveStagingStore:
         digest = hashlib.sha256(body).hexdigest()
         target = self.content_root / digest
         if target.exists():
+            # A digest hit is reusable only after verification. Operators may
+            # restore a stale volume, and treating its filename as proof would
+            # silently turn corruption into authoritative document content.
             if target.is_symlink() or not target.is_file():
                 raise GoogleDriveStagingIntegrityError("staged content path must be a regular file")
             existing = target.read_bytes()
@@ -66,6 +69,9 @@ class GoogleDriveStagingStore:
                     "existing staged content does not match its SHA-256 path"
                 )
         else:
+            # Write and fsync a sibling first, then publish with an atomic
+            # replace. Readers therefore observe either no object or all of it;
+            # they never observe a partially downloaded provider response.
             descriptor, temporary_name = tempfile.mkstemp(prefix=".stage-", dir=self.content_root)
             temporary = Path(temporary_name)
             try:

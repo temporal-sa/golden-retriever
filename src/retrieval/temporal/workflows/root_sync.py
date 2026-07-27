@@ -180,35 +180,6 @@ class RootSyncWorkflow(QuotaWaiterMixin):
                     )
                 )
 
-    def _user_input(
-        self,
-        command: StoreSyncInput,
-        user: UserCursor,
-        *,
-        sync_sequence: str,
-        page_limit: int | None,
-    ) -> UserSyncInput:
-        return UserSyncInput(
-            store_key=command.store_key,
-            lifecycle_generation=command.lifecycle_generation,
-            sync_sequence=sync_sequence,
-            user_key=user.user_key,
-            quota_scope=command.quota_scope,
-            work_class=command.work_class,
-            resource_types=command.resource_types,
-            cursor=user.cursor,
-            resource_cursors=user.resource_cursors,
-            completed_resource_types=user.completed_resource_types,
-            page_limit=page_limit,
-            resource_concurrency=command.resource_concurrency,
-            files_page_window_size=command.files_page_window_size,
-            files_per_page_concurrency=command.files_per_page_concurrency,
-            document_ingestion_concurrency=command.document_ingestion_concurrency,
-            provider_page_size=command.provider_page_size,
-            provider_task_queue=command.provider_task_queue,
-            priority_fairness_enabled=command.priority_fairness_enabled,
-        )
-
     async def _execute_user(
         self,
         command: StoreSyncInput,
@@ -227,11 +198,25 @@ class RootSyncWorkflow(QuotaWaiterMixin):
             )
             handle = await workflow.start_child_workflow(
                 "UserSyncWorkflow",
-                self._user_input(
-                    command,
-                    user,
+                UserSyncInput(
+                    store_key=command.store_key,
+                    lifecycle_generation=command.lifecycle_generation,
                     sync_sequence=sync_sequence,
+                    user_key=user.user_key,
+                    quota_scope=command.quota_scope,
+                    work_class=command.work_class,
+                    resource_types=command.resource_types,
+                    cursor=user.cursor,
+                    resource_cursors=user.resource_cursors,
+                    completed_resource_types=user.completed_resource_types,
                     page_limit=page_limit,
+                    resource_concurrency=command.resource_concurrency,
+                    files_page_window_size=command.files_page_window_size,
+                    files_per_page_concurrency=command.files_per_page_concurrency,
+                    document_ingestion_concurrency=command.document_ingestion_concurrency,
+                    provider_page_size=command.provider_page_size,
+                    provider_task_queue=command.provider_task_queue,
+                    priority_fairness_enabled=command.priority_fairness_enabled,
                 ),
                 id=workflow_id,
                 result_type=SyncResult,
@@ -252,6 +237,8 @@ class RootSyncWorkflow(QuotaWaiterMixin):
         page_limit: int | None,
         concurrency: int,
     ) -> list[SyncResult | BaseException]:
+        # The semaphore covers the full child lifetime, not just child start.
+        # That makes this batch a hard cap on live user subtrees.
         semaphore = asyncio.Semaphore(max(1, concurrency))
         tasks = [
             asyncio.create_task(
@@ -266,7 +253,9 @@ class RootSyncWorkflow(QuotaWaiterMixin):
             for user in users
         ]
         try:
-            # The page/round barrier and explicit exception classification are intentional.
+            # Drain the entire page/round before advancing its cursor. Returning
+            # exceptions lets the parent classify each user independently while
+            # preserving the stable input ordering used by zip(..., strict=True).
             return list(await asyncio.gather(*tasks, return_exceptions=True))
         except asyncio.CancelledError:
             for task in tasks:

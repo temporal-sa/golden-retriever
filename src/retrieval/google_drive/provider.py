@@ -474,6 +474,9 @@ class GoogleDriveProviderGateway:
                 "Google Drive preflight max_folders must be between 1 and 500",
                 error_type="InvalidPreflightRequest",
             )
+        # Traverse breadth-first so a deeply nested branch cannot consume the
+        # entire folder budget before sibling folders appear in the preview.
+        # Preflight reads metadata only; file bodies are downloaded by sync.
         pending = [self._config.root_folder_id]
         files: list[DriveFile] = []
         folders_scanned = 0
@@ -541,6 +544,8 @@ class GoogleDriveProviderGateway:
         ]
         held_file_id = self._config.held_file_id
         if held_file_id is None and searchable_ids:
+            # Choosing from the stable name/id ordering makes the default demo
+            # hold reproducible across retries and worker replicas.
             held_file_id = searchable_ids[0]
         if (
             self._config.held_file_id is not None
@@ -586,6 +591,9 @@ class GoogleDriveProviderGateway:
             )
 
         await self._staging.prepare()
+        # The page checkpoint is the idempotency boundary. A retried Activity
+        # must return the exact prior manifest rather than list a Drive folder
+        # whose contents may have changed since the first attempt.
         cached = await self._state.cached_page(request)
         if cached is not None:
             if cached.final:
@@ -625,6 +633,9 @@ class GoogleDriveProviderGateway:
 
         next_state = _next_traversal_state(traversal, page, self._config.root_folder_id)
         if next_state is None:
+            # Reconciliation happens only after traversal is complete. Deletes
+            # are emitted as bounded tombstone-only pages so they obey the same
+            # fan-out and checkpoint rules as document upserts.
             deleted_document_keys = await self._state.reconciled_deletions(request, documents)
             if deleted_document_keys:
                 await self._state.save_tombstones(request, deleted_document_keys)

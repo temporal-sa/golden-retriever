@@ -319,13 +319,20 @@ async def test_lifespan_health_and_static_ui() -> None:
 
         page = await client.get("/")
         assert page.status_code == 200
-        assert "Retrieval that stays correct" in page.text
-        assert "Reject late write" in page.text
-        assert "Workflow links" in page.text
-        assert "WORKFLOW MANAGER" in page.text
+        assert "<title>Durable Retrieval</title>" in page.text
+        assert "<h1>Durable Retrieval</h1>" in page.text
+        for heading in (
+            "Step 1: Scan target folder",
+            "Step 2: Run Ingestion",
+            "Step 3: Perform Retrieval w/ Lakebase",
+            "Step 4: Simulate the next generation increment",
+            "Step 5: Attempt a previous-generation write",
+            "Step 6: Check if the write succeeded",
+            "Step 7: Control Panel",
+        ):
+            assert heading in page.text
         assert "Start fresh ingestion scan" in page.text
         assert "Retrieve evidence" in page.text
-        assert "Release the old writer" in page.text
         script = await client.get("/app.js")
         assert script.status_code == 200
         assert "Retry deactivation" in script.text

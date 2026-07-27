@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
-    <title>Durable retrieval, live</title>
+    <title>Durable Retrieval</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E" />
     <link rel="stylesheet" href="/app.css" />
     <script src="/app.js" defer></script>
@@ -47,7 +47,7 @@
       <section class="stage" aria-live="polite">
         <div class="hero-copy">
           <p class="eyebrow">DEVELOPER EXPERIENCE, END TO END</p>
-          <h1>Retrieval that stays correct while the world changes.</h1>
+          <h1>Durable Retrieval</h1>
           <p>
             Temporal remembers the work. Lakebase decides which writes are still authoritative.
             The app gets durable retries, hybrid retrieval, and a clean transactional fence.
@@ -58,7 +58,7 @@
           <div class="card-index">01</div>
           <div class="card-body">
             <p class="eyebrow">CONNECT</p>
-            <h2>Start with a folder people can recognize.</h2>
+            <h2>Step 1: Scan target folder</h2>
             <p class="card-copy">
               Preflight traverses the configured folder through a bounded Temporal workflow. It
               checks metadata only—no file bodies enter workflow history.
@@ -79,7 +79,7 @@
           <div class="card-index">02</div>
           <div class="card-body">
             <p class="eyebrow">SYNC</p>
-            <h2>Let failure happen. Keep the code ordinary.</h2>
+            <h2>Step 2: Run Ingestion</h2>
             <p class="card-copy">
               One provider throttle is injected durably. Temporal waits and retries; Drive bodies
               and traversal checkpoints live in Lakebase, so any worker can continue.
@@ -101,7 +101,7 @@
           <div class="card-index">03</div>
           <div class="card-body">
             <p class="eyebrow">RETRIEVE</p>
-            <h2>Ask the folder, not a fixture.</h2>
+            <h2>Step 3: Perform Retrieval w/ Lakebase</h2>
             <p class="card-copy">
               Lakebase runs independent BM25 and ANN candidate searches, applies the lifecycle
               predicate to both, then combines them with reciprocal-rank fusion.
@@ -118,7 +118,7 @@
           <div class="card-index">04</div>
           <div class="card-body">
             <p class="eyebrow">DEACTIVATE</p>
-            <h2>Move authority before cleanup finishes.</h2>
+            <h2>Step 4: Simulate the next generation increment</h2>
             <p class="card-copy">
               Deactivation commits generation 8 first. Every older writer immediately becomes
               stale, regardless of which Temporal Activity is still finishing.
@@ -136,7 +136,7 @@
           <div class="card-index">05</div>
           <div class="card-body">
             <p class="eyebrow">REJECT LATE WRITE</p>
-            <h2>Release the old writer on purpose.</h2>
+            <h2>Step 5: Attempt a previous-generation write</h2>
             <p class="card-copy">
               The Activity resumes and reaches the database transaction. Lakebase atomically sees
               expected generation 7, actual generation 8, and rejects the write.
@@ -151,7 +151,7 @@
           <div class="card-index">06</div>
           <div class="card-body">
             <p class="eyebrow">RECAP</p>
-            <h2>Two systems, one simpler developer model.</h2>
+            <h2>Step 6: Check if the write succeeded</h2>
             <div class="recap-grid">
               <div><b>Temporal</b><span>durable execution, retries, cancellation, visibility</span></div>
               <div><b>Lakebase</b><span>connector state, hybrid search, transactional authority</span></div>
@@ -169,7 +169,7 @@
           <div class="workflow-manager-heading">
             <div>
               <p class="eyebrow">WORKFLOW MANAGER</p>
-              <h2 id="workflow-manager-title">Operate the current ingestion lifecycle.</h2>
+              <h2 id="workflow-manager-title">Step 7: Control Panel</h2>
               <p>
                 Cancel active ingestion, advance the authoritative generation through the safe
                 deactivation path, or submit a new full-folder scan.

@@ -205,7 +205,7 @@ def build_workers(
         max_in_flight=config.user_quota_max_in_flight,
         max_pending_requests=config.user_quota_max_pending_requests,
         dedup_window_size=config.user_quota_dedup_window_size,
-        continue_as_new_message_count=(config.user_quota_continue_as_new_message_count),
+        continue_as_new_message_count=config.user_quota_continue_as_new_message_count,
     )
     provider = ProviderActivities(provider_gateway)
     search_index = (

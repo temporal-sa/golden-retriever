@@ -656,7 +656,18 @@ class DemoService:
         store = await self._repository.get_store(operation.store_key)
         await self._reconcile_lifecycle_events(run, store)
 
-        terminal = await self._controller_operation_result(operation)
+        terminal: CommandResult | None = None
+        if self._commands is not None and operation.workflow_id is not None:
+            try:
+                terminal = await self._commands.get_operation_result(
+                    operation.store_key,
+                    operation.workflow_id,
+                )
+            except Exception:
+                # Lakebase operation state remains available while a Temporal
+                # query is temporarily unavailable. Never infer success merely
+                # from an operation disappearing from the active-ID set.
+                pass
         if terminal is not None and terminal.status in {
             OperationStatus.COMPLETED,
             OperationStatus.FAILED,
@@ -728,23 +739,6 @@ class DemoService:
             next_status,
             lifecycle_generation=store.lifecycle_generation,
         )
-
-    async def _controller_operation_result(
-        self,
-        operation: DemoOperation,
-    ) -> CommandResult | None:
-        if self._commands is None or operation.workflow_id is None:
-            return None
-        try:
-            return await self._commands.get_operation_result(
-                operation.store_key,
-                operation.workflow_id,
-            )
-        except Exception:
-            # Lakebase operation state remains available while a Temporal
-            # query is temporarily unavailable. Never infer success merely
-            # from an operation disappearing from the active-ID set.
-            return None
 
     async def list_events(
         self, run_id: str, *, after_event_id: int = 0, limit: int = 200

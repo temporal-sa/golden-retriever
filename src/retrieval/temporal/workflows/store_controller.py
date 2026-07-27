@@ -67,10 +67,15 @@ class StoreControllerWorkflow:
     @workflow.init
     def __init__(self, initial_state: StoreControllerState) -> None:
         self._state = initial_state
+        # Updates and signals may arrive concurrently, but every lifecycle
+        # mutation must observe one total order. Handlers therefore enqueue
+        # envelopes and the run loop is the sole writer of controller state.
         self._commands: asyncio.Queue[_CommandEnvelope] = asyncio.Queue()
         self._processing_command = False
 
     def _enqueue_update(self, kind: str, payload: Any) -> asyncio.Future[Any]:
+        # The Future couples an Update response to the serialized command that
+        # produced it. Signals use the same queue without needing a response.
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._commands.put_nowait(_CommandEnvelope(kind, payload, future))  # type: ignore[arg-type]
         return future
@@ -184,6 +189,8 @@ class StoreControllerWorkflow:
         recent = self._state.recent_command_results
         recent[result.command_id] = result
         overflow = len(recent) - max(1, self._state.command_dedup_window_size)
+        # dict insertion order is deterministic and survives serialization, so
+        # trimming the oldest keys gives retries a bounded, replay-safe window.
         for command_id in list(recent)[: max(0, overflow)]:
             del recent[command_id]
 
@@ -203,6 +210,8 @@ class StoreControllerWorkflow:
         credential_key = metadata.get("credential_key")
         if not provider or not credential_key:
             return None
+        # credential_key is an opaque account identity used for fair sharing;
+        # credential material itself must never enter Workflow history.
         try:
             weight = float(metadata.get("fairness_weight", "1"))
         except ValueError as exc:
@@ -499,7 +508,7 @@ class StoreControllerWorkflow:
                 expected_generation=command.expected_generation,
                 command_id=command.command_id,
                 operation_id=workflow_id,
-                drain_timeout_seconds=(self._state.deactivation_drain_timeout_seconds),
+                drain_timeout_seconds=self._state.deactivation_drain_timeout_seconds,
                 object_cleanup_batch_size=self._state.object_cleanup_batch_size,
                 controller_workflow_id=workflow.info().workflow_id,
                 sync_workflow_ids=tuple(

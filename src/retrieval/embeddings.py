@@ -77,7 +77,27 @@ class DatabricksEmbeddingProvider:
             raise ValueError("embedding inputs must not be empty")
         prefix = self._query_prefix if query else self._document_prefix
         inputs = [f"{prefix}{text}" for text in values]
-        response = await asyncio.to_thread(self._query_endpoint, inputs)
+
+        # The Databricks SDK is synchronous. Constructing the client can also
+        # inspect credential files, so both construction and the request stay
+        # off the event-loop thread.
+        client = self._workspace_client
+        if client is None:
+            try:
+                from databricks.sdk import WorkspaceClient
+            except ImportError as exc:  # pragma: no cover - guarded by deployment extras
+                raise RuntimeError("Databricks embeddings require databricks-sdk") from exc
+            client = await asyncio.to_thread(WorkspaceClient)
+            self._workspace_client = client
+        response = await asyncio.to_thread(
+            client.serving_endpoints.query,
+            name=self._endpoint_name,
+            input=inputs,
+        )
+
+        # SDK releases have returned both attribute objects and mappings. Keep
+        # that transport difference at this boundary so callers always receive
+        # the same immutable tuple shape.
         data = getattr(response, "data", None)
         if data is None and isinstance(response, Mapping):
             data = response.get("data")
@@ -101,17 +121,6 @@ class DatabricksEmbeddingProvider:
                 raise EmbeddingError("embedding endpoint returned a non-finite value")
             vectors.append(vector)
         return tuple(vectors)
-
-    def _query_endpoint(self, inputs: list[str]) -> Any:
-        client = self._workspace_client
-        if client is None:
-            try:
-                from databricks.sdk import WorkspaceClient
-            except ImportError as exc:  # pragma: no cover - guarded by deployment extras
-                raise RuntimeError("Databricks embeddings require databricks-sdk") from exc
-            client = WorkspaceClient()
-            self._workspace_client = client
-        return client.serving_endpoints.query(name=self._endpoint_name, input=inputs)
 
 
 def create_embedding_provider(

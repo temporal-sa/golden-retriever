@@ -45,24 +45,29 @@ class GoogleAuthAccessTokenProvider:
             token = getattr(self._credentials, "token", None)
             valid = bool(getattr(self._credentials, "valid", False))
             if force_refresh or not valid or not token:
-                await asyncio.to_thread(self._refresh)
+                # Refresh is blocking and may perform network I/O. Keeping the
+                # small sync adapter local makes its single purpose visible
+                # without adding another class-level method to chase.
+                def refresh_credentials() -> None:
+                    try:
+                        from google.auth.exceptions import RefreshError
+                        from google.auth.transport.requests import Request
+                    except ImportError as exc:  # pragma: no cover - packaging/configuration path
+                        raise GoogleDriveConfigurationError(
+                            "install the google-drive extra to use Google authentication"
+                        ) from exc
+                    try:
+                        self._credentials.refresh(Request())
+                    except RefreshError as exc:
+                        raise DriveAuthenticationError(
+                            "Google credential refresh was rejected"
+                        ) from exc
+
+                await asyncio.to_thread(refresh_credentials)
                 token = getattr(self._credentials, "token", None)
             if not token:
                 raise DriveAuthenticationError("Google credentials returned no access token")
             return str(token)
-
-    def _refresh(self) -> None:
-        try:
-            from google.auth.exceptions import RefreshError
-            from google.auth.transport.requests import Request
-        except ImportError as exc:  # pragma: no cover - packaging/configuration path
-            raise GoogleDriveConfigurationError(
-                "install the google-drive extra to use Google authentication"
-            ) from exc
-        try:
-            self._credentials.refresh(Request())
-        except RefreshError as exc:
-            raise DriveAuthenticationError("Google credential refresh was rejected") from exc
 
 
 def google_credentials(config: GoogleDriveConfig) -> Any:
@@ -155,7 +160,24 @@ class GoogleDriveApiClient:
             escaped_parent = parent_id.replace("\\", "\\\\").replace("'", "\\'")
             params["q"] = f"'{escaped_parent}' in parents"
 
-        response = await self._request("GET", "/files", params=params)
+        # A 401 gets exactly one forced token refresh. Other failures are
+        # classified immediately so Temporal can apply the right retry policy.
+        for auth_attempt in range(2):
+            token = await self._tokens.get_token(force_refresh=auth_attempt > 0)
+            response = await self._client.request(
+                "GET",
+                f"{self._base_url}/files",
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if response.status_code == 401 and auth_attempt == 0:
+                continue
+            if not response.is_success:
+                self._raise_response_error(response)
+            break
+        else:  # pragma: no cover - both concrete attempts either break or raise
+            raise DriveAuthenticationError("Google Drive rejected refreshed credentials")
+
         payload = response.json()
         raw_files = payload.get("files", ())
         if not isinstance(raw_files, list):
@@ -213,37 +235,9 @@ class GoogleDriveApiClient:
         else:
             path = f"/files/{encoded_id}/export"
             params = {"mimeType": export_mime_type}
-        return await self._stream_bytes(path, params=params, max_bytes=max_bytes)
 
-    async def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: dict[str, str | int],
-    ) -> Any:
-        for auth_attempt in range(2):
-            token = await self._tokens.get_token(force_refresh=auth_attempt > 0)
-            response = await self._client.request(
-                method,
-                f"{self._base_url}{path}",
-                params=params,
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            if response.status_code == 401 and auth_attempt == 0:
-                continue
-            if response.is_success:
-                return response
-            self._raise_response_error(response)
-        raise DriveAuthenticationError("Google Drive rejected refreshed credentials")
-
-    async def _stream_bytes(
-        self,
-        path: str,
-        *,
-        params: dict[str, str],
-        max_bytes: int,
-    ) -> bytes:
+        # Stream instead of calling response.read(): the byte ceiling is a
+        # memory-safety boundary and must be enforced while data arrives.
         for auth_attempt in range(2):
             token = await self._tokens.get_token(force_refresh=auth_attempt > 0)
             async with self._client.stream(

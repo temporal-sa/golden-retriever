@@ -62,7 +62,7 @@ class FailedUserRemediationWorkflow:
                         resource_concurrency=command.resource_concurrency,
                         files_page_window_size=command.files_page_window_size,
                         files_per_page_concurrency=command.files_per_page_concurrency,
-                        document_ingestion_concurrency=(command.document_ingestion_concurrency),
+                        document_ingestion_concurrency=command.document_ingestion_concurrency,
                         provider_page_size=command.provider_page_size,
                         provider_task_queue=command.provider_task_queue,
                         priority_fairness_enabled=command.priority_fairness_enabled,

@@ -30,6 +30,12 @@ from retrieval.temporal.runtime_config import TemporalRuntimeConfig
 
 
 class RetrievalClient:
+    """Submit lifecycle commands through each store's durable controller.
+
+    The controller is created with Update-with-Start, so callers do not need a
+    separate, race-prone "ensure controller exists" request before commands.
+    """
+
     def __init__(
         self,
         client: Client,
@@ -95,12 +101,17 @@ class RetrievalClient:
             ),
             id=store_controller_workflow_id(store_key),
             task_queue=self._task_queue,
+            # Concurrent first commands converge on the same stable controller
+            # instead of producing multiple lifecycle authorities.
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             search_attributes=search_attributes,
         )
 
     def _apply_sync_policy(self, command: SyncCommand) -> SyncCommand:
         metadata = dict(command.metadata)
+        # Policy travels in the command payload because Workflow executions
+        # must not read mutable process configuration. setdefault deliberately
+        # preserves explicit per-command overrides supplied by trusted callers.
         defaults = {
             "max_active_users": self._config.store_sync_max_active_users,
             "user_page_size": self._config.store_sync_user_page_size,
@@ -109,7 +120,7 @@ class RetrievalClient:
             "resource_concurrency": self._config.resource_concurrency,
             "files_page_window_size": self._config.files_page_window_size,
             "files_per_page_concurrency": self._config.files_per_page_concurrency,
-            "document_ingestion_concurrency": (self._config.document_ingestion_concurrency),
+            "document_ingestion_concurrency": self._config.document_ingestion_concurrency,
             "provider_task_queue": self._provider_task_queue,
             "priority_fairness_enabled": str(self._priority_fairness_active).lower(),
         }
@@ -129,6 +140,9 @@ class RetrievalClient:
         )
 
     async def cancel_sync(self, command: CancelSyncCommand) -> CancellationAccepted:
+        # Cancellation has no expected-generation field. Generation zero is
+        # used only if this is the first command; USE_EXISTING leaves an
+        # established controller's authoritative generation untouched.
         start = self._controller_start(command.store_key, 0)
         return await self._client.execute_update_with_start_workflow(
             "cancel_sync",
