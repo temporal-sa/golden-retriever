@@ -1,0 +1,228 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - link "Demo home" [ref=e3] [cursor=pointer]:
+      - /url: "#top"
+      - generic [ref=e4]: DB
+      - generic [ref=e5]:
+        - generic [ref=e6]: Temporal × Lakebase
+        - generic [ref=e7]: durable retrieval demo
+    - navigation "Demo tools" [ref=e8]:
+      - generic [ref=e9]: Google Drive ↗
+      - generic [ref=e10]: Temporal UI ↗
+      - generic [ref=e11]: Lakebase ↗
+    - button "Technical details" [ref=e12] [cursor=pointer]
+  - main [ref=e13]:
+    - complementary "Ten minute demo story" [ref=e14]:
+      - paragraph [ref=e15]: 10 minute story
+      - list [ref=e16]:
+        - listitem [ref=e17] [cursor=pointer]:
+          - generic [ref=e18]: "1"
+          - generic [ref=e19]:
+            - generic [ref=e20]: Connect
+            - generic [ref=e21]: Inspect one stable Drive folder
+        - listitem [ref=e22] [cursor=pointer]:
+          - generic [ref=e23]: "2"
+          - generic [ref=e24]:
+            - generic [ref=e25]: Sync
+            - generic [ref=e26]: Throttle, retry, then ingest
+        - listitem [ref=e27] [cursor=pointer]:
+          - generic [ref=e28]: "3"
+          - generic [ref=e29]:
+            - generic [ref=e30]: Retrieve
+            - generic [ref=e31]: BM25 + vector, fused in Lakebase
+        - listitem [ref=e32] [cursor=pointer]:
+          - generic [ref=e33]: "4"
+          - generic [ref=e34]:
+            - generic [ref=e35]: Deactivate
+            - generic [ref=e36]: Advance the authority fence
+        - listitem [ref=e37] [cursor=pointer]:
+          - generic [ref=e38]: "5"
+          - generic [ref=e39]:
+            - generic [ref=e40]: Reject late write
+            - generic [ref=e41]: Generation 7 loses to generation 8
+        - listitem [ref=e42] [cursor=pointer]:
+          - generic [ref=e43]: "6"
+          - generic [ref=e44]:
+            - generic [ref=e45]: Recap
+            - generic [ref=e46]: Durable orchestration, simple app
+      - generic [ref=e47]:
+        - generic [ref=e48]: Current run
+        - code [ref=e49]: 00000000-0000-0000-0000-000000000001
+    - generic [ref=e50]:
+      - generic [ref=e51]:
+        - paragraph [ref=e52]: DEVELOPER EXPERIENCE, END TO END
+        - heading "Retrieval that stays correct while the world changes." [level=1] [ref=e53]
+        - paragraph [ref=e54]: Temporal remembers the work. Lakebase decides which writes are still authoritative. The app gets durable retries, hybrid retrieval, and a clean transactional fence.
+      - article [ref=e55]:
+        - generic [ref=e56]: "01"
+        - generic [ref=e57]:
+          - paragraph [ref=e58]: CONNECT
+          - heading "Start with a folder people can recognize." [level=2] [ref=e59]
+          - paragraph [ref=e60]: Preflight traverses the configured folder through a bounded Temporal workflow. It checks metadata only—no file bodies enter workflow history.
+          - generic "Platform readiness" [ref=e61]:
+            - generic [ref=e62]:
+              - generic [ref=e63]: Lakebase + migrations
+              - strong [ref=e64]: ready
+            - generic [ref=e65]:
+              - generic [ref=e66]: Search indexes
+              - strong [ref=e67]: blocked
+            - generic [ref=e68]:
+              - generic [ref=e69]: Embedding endpoint
+              - strong [ref=e70]: ready
+            - generic [ref=e71]:
+              - generic [ref=e72]: Temporal pollers
+              - strong [ref=e73]: ready
+          - button "Inspect Drive folder" [ref=e74] [cursor=pointer]
+          - generic [ref=e75]: Connected · 1 files · 1 folders
+          - list [ref=e76]:
+            - listitem [ref=e236]:
+              - generic [ref=e237]:
+                - generic [ref=e238]: Roadmap
+                - generic [ref=e239]: unknown type · unknown version
+              - generic [ref=e240]: searchable
+      - article [ref=e78]:
+        - generic [ref=e79]: "02"
+        - generic [ref=e80]:
+          - paragraph [ref=e81]: SYNC
+          - heading "Let failure happen. Keep the code ordinary." [level=2] [ref=e82]
+          - paragraph [ref=e83]: One provider throttle is injected durably. Temporal waits and retries; Drive bodies and traversal checkpoints live in Lakebase, so any worker can continue.
+          - generic [ref=e84]:
+            - button "Create fresh run" [ref=e85] [cursor=pointer]
+            - button "Start sync" [ref=e86] [cursor=pointer]
+          - generic [ref=e87]:
+            - generic [ref=e88]:
+              - generic [ref=e89]: Provider
+              - strong [ref=e90]: retrying
+            - generic [ref=e91]:
+              - generic [ref=e92]: Documents
+              - strong [ref=e93]: "4"
+            - generic [ref=e94]:
+              - generic [ref=e95]: Chunks
+              - strong [ref=e96]: "12"
+            - generic [ref=e97]:
+              - generic [ref=e98]: Generation
+              - strong [ref=e99]: "7"
+      - article [ref=e100]:
+        - generic [ref=e101]: "03"
+        - generic [ref=e102]:
+          - paragraph [ref=e103]: RETRIEVE
+          - heading "Ask the folder, not a fixture." [level=2] [ref=e104]
+          - paragraph [ref=e105]: Lakebase runs independent BM25 and ANN candidate searches, applies the lifecycle predicate to both, then combines them with reciprocal-rank fusion.
+          - generic [ref=e106]: Question
+          - textbox "Question" [ref=e107]: What should the account team prioritize before Northstar's renewal?
+          - button "Retrieve evidence" [ref=e108] [cursor=pointer]
+          - generic [ref=e109]: No answer yet.
+          - list
+      - article [ref=e110]:
+        - generic [ref=e111]: "04"
+        - generic [ref=e112]:
+          - paragraph [ref=e113]: DEACTIVATE
+          - heading "Move authority before cleanup finishes." [level=2] [ref=e114]
+          - paragraph [ref=e115]: Deactivation commits generation 8 first. Every older writer immediately becomes stale, regardless of which Temporal Activity is still finishing.
+          - button "Commit generation fence" [disabled] [ref=e116]
+          - generic [ref=e117]:
+            - generic [ref=e118]:
+              - text: Late writer expects
+              - strong [ref=e119]: generation 7
+            - generic [ref=e120]: →
+            - generic [ref=e121]:
+              - text: Lakebase authority
+              - strong [ref=e122]: generation 7
+      - article [ref=e123]:
+        - generic [ref=e124]: "05"
+        - generic [ref=e125]:
+          - paragraph [ref=e126]: REJECT LATE WRITE
+          - heading "Release the old writer on purpose." [level=2] [ref=e127]
+          - paragraph [ref=e128]: The Activity resumes and reaches the database transaction. Lakebase atomically sees expected generation 7, actual generation 8, and rejects the write.
+          - button "Release late writer" [disabled] [ref=e129]
+          - generic [ref=e130]: Waiting for the held document and fence.
+          - button "Arm hold" [disabled] [ref=e131]
+      - article [ref=e132]:
+        - generic [ref=e133]: "06"
+        - generic [ref=e134]:
+          - paragraph [ref=e135]: RECAP
+          - heading "Two systems, one simpler developer model." [level=2] [ref=e136]
+          - generic [ref=e137]:
+            - generic [ref=e138]:
+              - generic [ref=e139]: Temporal
+              - generic [ref=e140]: durable execution, retries, cancellation, visibility
+            - generic [ref=e141]:
+              - generic [ref=e142]: Lakebase
+              - generic [ref=e143]: connector state, hybrid search, transactional authority
+            - generic [ref=e144]:
+              - generic [ref=e145]: Your app
+              - generic [ref=e146]: commands, reads, and a few explicit invariants
+          - generic [ref=e147]:
+            - button "Load Lakebase proof" [ref=e148] [cursor=pointer]
+            - button "Copy proof query" [disabled] [ref=e149]
+          - generic [ref=e150]: Proof becomes available after a run is created.
+      - region [ref=e151]:
+        - generic [ref=e152]:
+          - generic [ref=e153]:
+            - paragraph [ref=e154]: WORKFLOW MANAGER
+            - heading "Operate the current ingestion lifecycle." [level=2] [ref=e155]
+            - paragraph [ref=e156]: Cancel active ingestion, advance the authoritative generation through the safe deactivation path, or submit a new full-folder scan.
+          - generic [ref=e157]: active
+        - generic [ref=e158]:
+          - generic [ref=e159]:
+            - term [ref=e160]: Controller
+            - definition [ref=e161]: store-controller/northstar
+          - generic [ref=e162]:
+            - term [ref=e163]: Generation
+            - definition [ref=e164]: "7"
+          - generic [ref=e165]:
+            - term [ref=e166]: Active ingestion
+            - definition [ref=e167]: "1"
+        - generic [ref=e168]:
+          - button "End active workflow" [ref=e169] [cursor=pointer]
+          - button "Increment generation" [ref=e170] [cursor=pointer]
+          - button "Start fresh ingestion scan" [disabled] [ref=e171]
+        - paragraph [ref=e172]: 1 ingestion workflow is active.
+  - complementary [ref=e173]:
+    - generic [ref=e174]:
+      - generic [ref=e175]:
+        - paragraph [ref=e176]: LIVE EVIDENCE
+        - heading [level=2] [ref=e177]: Technical details
+      - button [ref=e178] [cursor=pointer]: Close
+    - generic [ref=e179]:
+      - generic [ref=e180]:
+        - term [ref=e181]: Lifecycle
+        - definition [ref=e182]: active
+      - generic [ref=e183]:
+        - term [ref=e184]: Search
+        - definition [ref=e185]: postgres_text
+      - generic [ref=e186]:
+        - term [ref=e187]: Temporal
+        - definition [ref=e188]: connected
+      - generic [ref=e189]:
+        - term [ref=e190]: Controller
+        - definition [ref=e191]: connected
+    - heading [level=3] [ref=e192]: Workflow links
+    - generic [ref=e193]:
+      - generic [ref=e241]:
+        - text: controller
+        - generic [ref=e242]: store-controller/northstar
+      - generic [ref=e243]:
+        - text: sync
+        - generic [ref=e244]: store-sync/northstar/7/one
+    - heading [level=3] [ref=e194]: Operations
+    - generic [ref=e195]: No operations yet.
+    - heading [level=3] [ref=e196]: Temporal coordination
+    - generic [ref=e197]: permit = await self.request_quota_permit(request) page = await workflow.execute_activity("provider_fetch_resource_page", ...)
+    - heading [level=3] [ref=e198]: Lakebase visibility guard
+    - generic [ref=e199]: WHERE stores.lifecycle_state IN ('active', 'syncing') AND documents.lifecycle_generation = stores.lifecycle_generation AND document_chunks.lifecycle_generation = stores.lifecycle_generation
+    - heading [level=3] [ref=e200]: Lakebase event evidence
+    - list [ref=e201]:
+      - listitem [ref=e245]:
+        - paragraph [ref=e246]: Temporal waiting durably
+        - paragraph [ref=e247]: event · expected undefined, actual undefined
+      - listitem [ref=e248]:
+        - paragraph [ref=e249]: generation fence committed
+        - paragraph [ref=e250]: event · expected undefined, actual undefined
+    - generic [ref=e203]: 2 events
+    - generic [ref=e204]: "7"
+    - generic [ref=e205]: "2"
+    - generic [ref=e206]: armed
+    - generic [ref=e207]: Waiting for generation fence
+    - generic [ref=e209]: Northstar AI
+    - generic [ref=e210]: Updated 6:03:13 PM

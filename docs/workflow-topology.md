@@ -1,8 +1,10 @@
 # Workflow topology
 
 This page is the visual guide to the runtime described in
-[`IMPLEMENTATION_MAP.md`](../IMPLEMENTATION_MAP.md). It shows workflow ownership, bounded fan-out,
-provider quota coordination, recovery, and store deactivation.
+[`IMPLEMENTATION_MAP.md`](../IMPLEMENTATION_MAP.md). It was validated on 2026-07-27 against
+`V2_WORKFLOW_TYPES`, the child-workflow call sites, the worker registrations, and the full-topology
+integration test. The primary path has 17 registered Workflow Types. Two legacy names can be
+enabled only to drain compatible histories.
 
 In the diagrams, a **joined** child must finish before its parent can finish. A **detached**
 workflow is started with a stable Workflow ID, acknowledged by Temporal, and then tracked by the
@@ -28,8 +30,56 @@ stateDiagram-v2
     INACTIVE --> INACTIVE: sync rejected
 ```
 
-The controller accepts only one store operation at a time. A store remains `SYNCING` while any
-detached failed-user remediation is still active, even if its root sync has already finished.
+The controller serializes commands and admits at most one sync. A deactivation command may
+supersede an active sync or remediation: it commits the generation fence, requests cancellation,
+and then drains the controller-owned operations. A store remains `SYNCING` while any detached
+failed-user remediation is still active, even if its root sync has already finished.
+
+## Runtime processes and data ownership
+
+The Lakebase variant made this process boundary especially clear, and the same separation applies
+to the generic runtime. The application submits commands and reads status. A long-running worker
+process hosts two Temporal pollers. Provider bodies remain in staging, and only Activities cross
+the provider, staging, and repository boundaries.
+
+```mermaid
+flowchart LR
+    caller["Application or API"]
+    client["RetrievalClient"]
+
+    subgraph temporal["Temporal namespace"]
+        controller[["StoreControllerWorkflow"]]
+        syncTree[["Sync and remediation workflows"]]
+        quota[["UserQuotaWorkflow"]]
+        deactivationTree[["Deactivation workflows"]]
+    end
+
+    subgraph worker["retrieval-worker process"]
+        retrievalPoller["retrieval-v2 poller<br/>workflows + persistence Activities"]
+        providerPoller["retrieval-provider-v2 poller<br/>provider Activities"]
+        adapters["Repository, staging, and provider adapters"]
+    end
+
+    repository[("RetrievalRepository<br/>lifecycle + indexed state")]
+    staging[("StagingStore<br/>document bodies")]
+    provider{{"Provider API"}}
+
+    caller --> client
+    client ==>|"Update-with-Start and queries"| controller
+    controller --> syncTree
+    controller --> deactivationTree
+    syncTree <--> quota
+    retrievalPoller <--> temporal
+    providerPoller <--> temporal
+    retrievalPoller --> adapters
+    providerPoller --> adapters
+    adapters --> repository
+    adapters --> staging
+    adapters --> provider
+```
+
+The queue split is intentional isolation, not a deployment requirement that the pollers live in
+different processes. The current worker runs both pollers in one process.
 
 ## End-to-end workflow tree
 
@@ -39,7 +89,7 @@ flowchart TB
     client["RetrievalClient"]
 
     subgraph control["Command serialization and lifecycle ownership"]
-        controller[["StoreControllerWorkflow<br/>one per store; idle-only Continue-As-New"]]
+        controller[["StoreControllerWorkflow<br/>one per store; quiescent-handler Continue-As-New"]]
     end
 
     subgraph sync["Sync and remediation"]
@@ -51,6 +101,7 @@ flowchart TB
         document[["DocumentIngestionWorkflow<br/>generation-fenced mutation"]]
         remediation[["FailedUserRemediationWorkflow<br/>detached and controller-tracked"]]
         activate[["ActivateUserWorkflow<br/>recent sync, fence check, backfill"]]
+        activationUser[["UserSyncWorkflow<br/>activation wave"]]
         comments[["CommentsResyncWorkflow<br/>optional direct boundary"]]
 
         root -->|"joined, bounded users"| user
@@ -60,7 +111,8 @@ flowchart TB
         files -->|"joined, bounded documents"| document
         root -->|"failed user batches; detached"| remediation
         remediation -->|"joined, bounded batches"| activate
-        activate -->|"recent then backfill"| user
+        activate -->|"recent then backfill; joined"| activationUser
+        activationUser -->|"same joined resource subtree"| resource
         comments -->|"joined"| resource
     end
 
@@ -74,7 +126,7 @@ flowchart TB
         deactivateUser[["DeactivateUserWorkflow"]]
         deactivateOne[["DeactivateOneUserWorkflow"]]
         deactivateAll[["DeactivateAllUsersWorkflow"]]
-        removeObjects[["RemoveObjectsWorkflow"]]
+        removeObjects[["RemoveObjectsWorkflow<br/>one repository cleanup Activity"]]
 
         deactivateStore -->|"joined"| cleanupUsers
         cleanupUsers -->|"explicit user keys"| deactivateUser
@@ -104,6 +156,11 @@ flowchart TB
     deactivateStore -.->|"cancel_generation"| userQuota
     controller -.->|"operation_drained"| deactivateStore
 ```
+
+The root starts remediation as a Child Workflow with `ABANDON` close/cancellation policies, then
+registers its stable ID with the controller. It may outlive the root. The controller itself can
+Continue-As-New while carrying active-operation registrations; it waits for Update/Signal handlers
+and the internal command queue to become quiescent, not for all owned operations to finish.
 
 `CommentsResyncWorkflow` is registered for callers that use the direct comments boundary; the
 controller-driven sync tree does not start it. `QuotaWaitWorkflow` and `AccessioningWorkflow` can
@@ -245,6 +302,7 @@ flowchart TB
     prefail["Failure before fence<br/>store remains ACTIVE or SYNCING"]
     postfail["Failure after fence<br/>mark DEACTIVATION_FAILED"]
     retry["Retry same generation and stable ID"]
+    resume["Resume or verify the committed generation<br/>do not advance it again"]
     partial["Acknowledgement, cancellation, quota-signal,<br/>or drain warning; cleanup continues"]
 
     command --> start --> fence --> acknowledge --> cancel --> quota --> drain --> users --> objects --> inactive --> terminal
@@ -256,7 +314,7 @@ flowchart TB
     users -.->|"failure"| postfail
     objects -.->|"failure"| postfail
     inactive -.->|"failure"| postfail
-    postfail --> retry --> fence
+    postfail --> retry --> resume --> acknowledge
 ```
 
 Warnings do not interrupt cleanup, but they can produce a `PARTIAL` result. A committed generation
@@ -266,6 +324,7 @@ is never decremented during a retry, deployment rollback, or operational recover
 
 | Boundary | Completion rule | Bound or barrier |
 |---|---|---|
+| Controller → Continue-As-New | Same logical execution chain; state carried forward | Update/Signal handlers finished and command queue empty; active operations may remain |
 | Controller → root sync | Detached, stable ID, controller registry | One active sync per store |
 | Root sync → user sync | Joined children | User-page barrier or bounded round window |
 | User sync → resource sync | Joined children | `RESOURCE_CONCURRENCY` |
@@ -276,4 +335,28 @@ is never decremented during a retry, deployment rollback, or operational recover
 | Activation → user sync | Sequential recent and backfill waves | Generation check between waves |
 | Provider request → quota | Shared Signal-with-Start coordinator | Per-scope in-flight and pending caps |
 | Controller → deactivation | Detached, stable generation ID | Fence before cancellation and bounded drain |
-| Deactivation → cleanup | Joined children | Bounded user batches, then object cleanup |
+| Deactivation → user cleanup | Joined children | Bounded user batches |
+| Deactivation → object cleanup | Joined child with one repository Activity | Repository implementation owns the bound in the current main branch |
+
+## Lakebase variant pull-back assessment
+
+The Lakebase variant preserves the same 17 core Workflow Types and adds
+`ProviderPreflightWorkflow`; it does not validate a smaller core workflow tree. The following
+variant changes are useful in the generic architecture:
+
+| Candidate | Recommendation | Why |
+|---|---|---|
+| One process-owned adapter bundle and close boundary | Pull in | Simplifies coupled factory configuration and makes partial startup/shutdown cleanup explicit without coupling workflows to Lakebase |
+| Bounded object-deletion Activity loop with Continue-As-New | Pull in | Replaces the current repository-sized cleanup Activity with measurable batches and bounded history |
+| Reconcile a committed deactivation fence from repository authority after controller Continue-As-New | Pull in | Closes a lost/racing `deactivation_fenced` Signal recovery gap |
+| Bounded operation-result query on the controller | Pull in when asynchronous APIs need durable polling | Avoids a second operation-status authority while keeping the controller result window bounded |
+| `ProviderPreflightWorkflow` | Keep optional at the application edge | Useful for an interactive connector readiness check, but it is not part of sync correctness |
+| Lakebase schemas, search, demo controls, and HTTP receipts | Keep in a deployment-specific diagram | They are valid adapter/application concerns, not generic Temporal topology |
+
+No Task Queue or core fan-out boundary should be removed solely because the Lakebase deployment
+uses one database. If runtime measurements justify reducing Workflow Types, the first compatibility
+wrappers to reassess are `DeactivateUserWorkflow` and `CommentsResyncWorkflow`; keep their old
+registrations available until all histories that reference them have drained. Merging
+`ResourceSyncWorkflow` into `ResourcePagesWorkflow`, or replacing per-document child workflows
+with direct Activities, changes history partitioning and retry/visibility semantics and therefore
+needs event-count and failure-isolation evidence rather than a diagram-only change.
